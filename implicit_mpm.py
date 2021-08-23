@@ -38,7 +38,7 @@ class ImplicitMPMSovler:
         self.old_F = ti.Matrix.field(dim, dim, dtype=real, shape=n_particles)  # for backup/restore F
 
         self.grid_v = ti.Vector.field(dim, dtype = real) # grid node momentum/velocity
-        self.grid_m = ti.field(dtype = real) # grid node mass
+        self.grid_m = ti.field(dtype=real) # grid node mass
 
         block_size = 16
         indices = ti.ijk if self.dim == 3 else ti.ij
@@ -46,8 +46,15 @@ class ImplicitMPMSovler:
         self.grid.dense(
             indices, block_size).place(self.grid_v, self.grid_m)
 
+
+        # Data for Newton's method
+        self.mass_matrix = ti.field(dtype=real)
+        self.dv = ti.Vector.field(dim, dtype=real)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
+        self.residual = ti.Vector.field(dim, dtype=real)
+
     def reinitialize(self):
-        pass
+        self.grid.deactivate_all()
+        # self.newton_data.deactivate_all()
 
     @ti.kernel
     def particles_to_grid(self):

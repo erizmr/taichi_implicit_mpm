@@ -1,8 +1,8 @@
-import taichi as ti
+
 
 class MPMSimulationBase:
-    def __init__(self):
-        pass
+    def __init__(self, implicit=False):
+        self.implicit = implicit
 
     def initialize(self):
         pass
@@ -13,15 +13,24 @@ class MPMSimulationBase:
     def particles_to_grid(self):
         pass
 
-    def grid_operations(self):
-        pass
+    def grid_velocity_update(self):
+        if self.implicit:
+            self.backward_euler()
+        else:
+            self.grid_velocity_update_explicit()
 
     def grid_to_particles(self):
+        pass
+
+    def grid_velocity_update_explicit(self):
+        pass
+
+    def backward_euler(self):
         pass
 
     def advance_one_time_step(self):
         self.reinitialize()
         self.particles_to_grid()
-        self.grid_operations()
+        self.grid_velocity_update()
         self.grid_to_particles()
 
