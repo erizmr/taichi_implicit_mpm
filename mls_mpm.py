@@ -6,10 +6,12 @@ ti.init(arch=ti.cuda)
 @ti.data_oriented
 class MlsMpmSolver(MPMSimulationBase):
     def __init__(self, dt=1e-4, dim=2, gravity=9.8, gravity_dim=1, implicit=False):
-        super(MlsMpmSolver, self).__init__()
+        super(MlsMpmSolver, self).__init__(implicit=implicit)
         self.dim = dim
         self.real = ti.f32
         self.quality = 1  # Use a larger value for higher-res simulations
+        self.ignore_collision = True
+        self.debug_mode = True
         self.n_particles, self.n_grid = 9000 * self.quality ** 2, 128 * self.quality
         self.n_nodes = self.n_grid ** self.dim
         self.bound = 3  # boundary of the simulation domain
@@ -48,10 +50,15 @@ class MlsMpmSolver(MPMSimulationBase):
             self.old_F = ti.Matrix.field(self.dim, self.dim, dtype=self.real,
                             shape=self.n_particles)  # backup deformation gradient
 
+            # # Quantities for linear solver
+            # self.mass_matrix = ti.field(dtype=self.real, shape=self.n_nodes)
+            # self.dv = ti.Vector.field(dim, dtype=self.real, shape=self.n_nodes)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
+            # self.residual = ti.Vector.field(dim, dtype=self.real, shape=self.n_nodes)
+
             # Quantities for linear solver
-            self.mass_matrix = ti.field(dtype=self.real, shape=self.n_nodes)
-            self.dv = ti.Vector.field(dim, dtype=self.real, shape=self.n_nodes)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
-            self.residual = ti.Vector.field(dim, dtype=self.real, shape=self.n_nodes)
+            self.mass_matrix = ti.field(dtype=self.real, shape=(self.n_grid,)*self.dim)
+            self.dv = ti.Vector.field(dim, dtype=self.real, shape=(self.n_grid,)*self.dim)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
+            self.residual = ti.Vector.field(dim, dtype=self.real, shape=(self.n_grid,)*self.dim)
 
     @ti.kernel
     def initialize(self):
@@ -62,6 +69,12 @@ class MlsMpmSolver(MPMSimulationBase):
             ]
             self.material[i] = i // self.group_size  # 0: fluid 1: jelly 2: snow
             self.v[i] = ti.Matrix([0, 0])
+            if self.material[i] == 0:
+                self.v[i] = ti.Matrix([0, 2.0])
+            if self.material[i] == 1:
+                self.v[i] = ti.Matrix([0, -2.0])
+            if self.material[i] == 2:
+                self.v[i] = ti.Matrix([0, -3.0])
             self.F[i] = ti.Matrix([[1, 0], [0, 1]])
             self.Jp[i] = 1
 
@@ -120,6 +133,11 @@ class MlsMpmSolver(MPMSimulationBase):
                 self.grid_m[base + offset] += weight * self.p_mass
                 self.grid_v_new[base + offset] -= weight * (stress @ dpos)  # Store the stress
 
+        if self.implicit:
+            for I in ti.grouped(self.grid_m):
+                if self.grid_m[I] > 0:
+                    self.grid_v[I] /= self.grid_m[I]  # momentum to velocity
+
     @ti.kernel
     def grid_velocity_update_explicit(self):
         for I in ti.grouped(self.grid_m):
@@ -152,22 +170,40 @@ class MlsMpmSolver(MPMSimulationBase):
         # Which should be called at the beginning of newton.
         self.backup_strain()
 
-        self.newtonSolve()
+        # self.newton_solve()
+        self.gradient_descent_solve()
 
         self.restore_strain()
-        self.constructNewVelocityFromNewtonResult()
+        self.construct_new_velocity_from_newton_result()
+
+    @ti.func
+    def dpsi_dF(self, F):  # first Piola-Kirchoff stress P(F), i.e. ∂Ψ/∂F
+        U, sig, V = ti.svd(F)
+        J = F.determinant()
+        R = U @ V.transpose()
+        return 2 * self.mu_0 * (F - R) + self.lambda_0 * (J - 1) * J * F.inverse().transpose()
 
     @ti.kernel
     def build_initial_dv_for_newton(self):
         for I in ti.grouped(self.grid_m):
             if self.grid_m[I] > 0:
-                node_id = self.idx(I)
+                # node_id = self.idx(I)
+                node_id = I
                 if ti.static(not self.ignore_collision):
                     cond = (I < self.bound and self.grid_v[I] < 0) or (
                                 I > self.n_grid - self.bound and self.grid_v[I] > 0)
                     self.dv[node_id] = 0 if cond else self.gravity * self.dt
                 else:
                     self.dv[node_id] = self.gravity * self.dt  # Newton initial guess for non-collided nodes
+                    # print(self.dv[node_id])
+
+    @ti.kernel
+    def construct_new_velocity_from_newton_result(self):
+        for I in ti.grouped(self.grid_m):
+            if self.grid_m[I] > 0:
+                self.grid_v[I] += self.dv[I]   # self.dv[self.idx(I)]
+                cond = (I < self.bound and self.grid_v[I] < 0) or (I > self.n_grid - self.bound and self.grid_v[I] > 0)
+                self.grid_v[I] = 0 if cond else self.grid_v[I]
 
     # [i, j] or [i, j, k] -> id
     @ti.func
@@ -194,10 +230,82 @@ class MlsMpmSolver(MPMSimulationBase):
         for I in ti.grouped(self.grid_m):
             mass = self.grid_m[I]
             if mass > 0:
-                self.mass_matrix[self.idx(I)] = mass
+                # self.mass_matrix[self.idx(I)] = mass
+                self.mass_matrix[I] = mass
 
-    def newton_solver(self):
-        pass
+    @ti.kernel
+    def incremental_update(self, dst: ti.template(), src: ti.template(), rate: ti.f32, step_direction: ti.template()):
+        for I in ti.grouped(src):
+            dst[I] = src[I] + rate * step_direction[I]
+
+    @ti.kernel
+    def compute_norm(self) -> ti.f32:
+        norm_sq = ti.cast(0.0, self.real)
+        for I in ti.grouped(self.dv):
+            mass = self.mass_matrix[I]
+            residual = self.residual[I]
+            if mass > 0:
+                norm_sq += residual.dot(residual) / mass
+        return ti.sqrt(norm_sq)
+
+    def gradient_descent_solve(self):
+        for i in range(15):
+            self.compute_energy_gradient()
+            self.incremental_update(self.dv, self.dv, 10, self.residual)
+            residual_norm = self.compute_norm()
+            if ti.static(self.debug_mode):
+                print('\033[1;31mgradient_descent_iter = ', i, ', residual_norm = ', residual_norm, '\033[0m')
+
+    @ti.func
+    def project(self, x: ti.template()):
+        for p in ti.grouped(x):
+            # I = self.node(p)
+            I = p
+            cond = any(I < self.bound and self.grid_v[I] < 0) or any(
+                I > self.n_grid - self.bound and self.grid_v[I] > 0)
+            if cond:
+                x[p] = ti.zero(x[p])
+
+    @ti.kernel
+    def compute_energy_gradient(self):
+        # Compute the RHS (i.e. usually energy gradient) of the linear system
+        for I in ti.grouped(self.dv):
+            self.residual[I] = self.dt * self.mass_matrix[I] * self.gravity
+
+        for I in ti.grouped(self.dv):
+            self.residual[I] -= self.mass_matrix[I] * self.dv[I]
+
+        # Compute dpsi/dF * F^T, P->G
+        ti.block_dim(self.n_grid)
+        for p in self.x:
+            Xp = self.x[p] * self.inv_dx
+            base = int(Xp - 0.5)
+            fx = Xp - base
+            w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
+            new_C = ti.zero(self.C[p])
+            for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
+                dpos = (offset - fx) * self.dx
+                weight = ti.cast(1.0, self.real)
+                for i in ti.static(range(self.dim)):
+                    weight *= w[offset[i]][i]
+
+                # g_v = self.grid_v[base + offset] + self.dv[self.idx(base + offset)]
+                g_v = self.grid_v[base + offset] + self.dv[base + offset]
+                new_C += 4 * self.inv_dx * weight * g_v.outer_product(dpos)
+
+            F = (ti.Matrix.identity(self.real, self.dim) + self.dt * new_C) @ self.old_F[p]
+            stress = (-self.p_vol * 4 * self.inv_dx * self.inv_dx) * self.dpsi_dF(F) @ self.old_F[p].transpose()
+
+            for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
+                dpos = (offset - fx) * self.dx
+                weight = ti.cast(1.0, self.real)
+                for i in ti.static(range(self.dim)):
+                    weight *= w[offset[i]][i]
+                force = weight * stress @ dpos
+                # self.residual[self.idx(base + offset)] += self.dt * force
+                self.residual[base + offset] += self.dt * force
+        self.project(self.residual)
+
 
     @ti.kernel
     def grid_to_particles(self):
@@ -205,8 +313,10 @@ class MlsMpmSolver(MPMSimulationBase):
             base = (self.x[p] * self.inv_dx - 0.5).cast(int)
             fx = self.x[p] * self.inv_dx - base.cast(self.real)
             w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
-            new_v = ti.Vector.zero(self.real, 2)
-            new_C = ti.Matrix.zero(self.real, 2, 2)
+            # new_v = ti.Vector.zero(self.real, 2)
+            # new_C = ti.Matrix.zero(self.real, 2, 2)
+            new_v = ti.zero(self.v[p])
+            new_C = ti.zero(self.C[p])
             for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):  # loop over 3x3 grid node neighborhood
                 dpos = offset.cast(self.real) - fx
                 weight = ti.cast(1.0, self.real)
@@ -220,8 +330,15 @@ class MlsMpmSolver(MPMSimulationBase):
 
 
 if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='MPM')
+    parser.add_argument('--implicit', action='store_true',
+                        help='implicit or not')
+    args = parser.parse_args()
+
     gui = ti.GUI("Taichi MLS-MPM", res=512, background_color=0x112F41)
-    solver = MlsMpmSolver(dt=1e-4, gravity=50)
+    solver = MlsMpmSolver(dt=1e-3, gravity=0.0, implicit=args.implicit)
     solver.initialize()
     while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
         for s in range(int(2e-3 // solver.dt)):
