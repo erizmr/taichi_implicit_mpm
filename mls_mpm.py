@@ -208,15 +208,15 @@ class MlsMpmSolver(MPMSimulationBase):
         result = ti.cast(0.0, self.real)
         
         # elastic potential energy
-        # for p in self.F:
-        #     result += self.psi(self.F[p]) * self.p_vol  # gathered from particles, psi defined in the rest space
-        # print('after elastic', result)
+        for p in self.F:
+            result += self.psi(self.F[p]) * self.p_vol  # gathered from particles, psi defined in the rest space
+        print('after elastic', result)
         # inertia energy
-        # for I in ti.grouped(self.dv):
-        #     m = self.mass_matrix[I]
-        #     dv = self.dv[I]
-        #     result += m * dv.dot(dv) / 2
-        # print('after inertia', result)
+        for I in ti.grouped(self.dv):
+            m = self.mass_matrix[I]
+            dv = self.dv[I]
+            result += m * dv.dot(dv) / 2
+        print('after inertia', result)
         # gravity potential
         for I in ti.grouped(self.dv):
             m = self.mass_matrix[I]
