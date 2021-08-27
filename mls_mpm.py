@@ -66,7 +66,10 @@ class MlsMpmSolver(MPMSimulationBase):
             self.residual = ti.Vector.field(dim, dtype=self.real, shape=(self.n_grid,)*self.dim)
 
             # Define a diff test object
-            self.diff_test = DiffTest(self.dim, self.dv, self.total_energy, self.compute_energy_gradient)
+            self.diff_test = DiffTest(self.dim, self.dv,
+                                      self.total_energy,
+                                      self.compute_energy_gradient,
+                                      self.update_state)
 
     def initialize(self):
         self.simulation_initialize()
@@ -88,7 +91,7 @@ class MlsMpmSolver(MPMSimulationBase):
             if self.material[i] == 2:
                 self.v[i] = ti.Matrix([0, -3.0])
             self.F[i] = ti.Matrix([[1, 0], [0, 1]])
-            self.old_F[i] = ti.Matrix([[1, 0], [0, 1]])
+            # self.old_F[i] = ti.Matrix([[1, 0], [0, 1]])
             self.Jp[i] = 1
 
     @ti.kernel
@@ -111,11 +114,17 @@ class MlsMpmSolver(MPMSimulationBase):
                 10 *
                 (1.0 -
                  self.Jp[p]))  # Hardening coefficient: snow gets harder when compressed
-            if self.material[p] == 1:  # jelly, make it softer
+
+            # JELLY ONLY
+            if self.material[p] == 1 or self.material[p] == 0:  # jelly, make it softer
                 h = 0.3
+
             mu, la = self.mu_0 * h, self.lambda_0 * h
-            if self.material[p] == 0:  # liquid
-                mu = 0.0
+
+            # JELLY ONLY
+            # if self.material[p] == 0:  # liquid
+            #     mu = 0.0
+
             U, sig, V = ti.svd(self.F[p])
             J = 1.0
             for d in ti.static(range(2)):
@@ -126,12 +135,15 @@ class MlsMpmSolver(MPMSimulationBase):
                 self.Jp[p] *= sig[d, d] / new_sig
                 sig[d, d] = new_sig
                 J *= new_sig
-            if self.material[
-                p] == 0:  # Reset deformation gradient to avoid numerical instability
-                self.F[p] = ti.Matrix.identity(self.real, 2) * ti.sqrt(J)
-            elif self.material[p] == 2:
-                self.F[p] = U @ sig @ V.transpose(
-                )  # Reconstruct elastic deformation gradient after plasticity
+
+            # JELLY ONLY
+            # if self.material[
+            #     p] == 0:  # Reset deformation gradient to avoid numerical instability
+            #     self.F[p] = ti.Matrix.identity(self.real, 2) * ti.sqrt(J)
+            # elif self.material[p] == 2:
+            #     self.F[p] = U @ sig @ V.transpose(
+            #     )  # Reconstruct elastic deformation gradient after plasticity
+
             stress = 2 * mu * (self.F[p] - U @ V.transpose()) @ self.F[p].transpose(
             ) + ti.Matrix.identity(self.real, 2) * la * J * (J - 1)
             # stress = (-self.dt * self.p_vol * 4 * self.inv_dx * self.inv_dx) * stress
@@ -204,27 +216,47 @@ class MlsMpmSolver(MPMSimulationBase):
         return 2 * self.mu_0 * (F - R) + self.lambda_0 * (J - 1) * J * F.inverse().transpose()
 
     @ti.kernel
-    def total_energy(self) -> ti.f32:
+    def total_energy(self, x: ti.template()) -> ti.f32:
         result = ti.cast(0.0, self.real)
-        
         # elastic potential energy
         for p in self.F:
             result += self.psi(self.F[p]) * self.p_vol  # gathered from particles, psi defined in the rest space
         print('after elastic', result)
+
         # inertia energy
-        for I in ti.grouped(self.dv):
+        for I in ti.grouped(x):
             m = self.mass_matrix[I]
-            dv = self.dv[I]
+            dv = x[I]
             result += m * dv.dot(dv) / 2
         print('after inertia', result)
+
         # gravity potential
-        for I in ti.grouped(self.dv):
+        for I in ti.grouped(x):
             m = self.mass_matrix[I]
-            # dv = self.dv[I]
             for i in ti.static(range(self.dim)):
                 result -= self.dt * m * self.gravity[i]
-        # print('after gravity', result)
+        print('after gravity', result)
         return result
+
+    @ti.kernel
+    def update_state(self, dv: ti.template()):
+        ti.block_dim(self.n_grid)
+        for p in self.x:
+            Xp = self.x[p] * self.inv_dx
+            base = int(Xp - 0.5)
+            fx = Xp - base
+            w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
+            new_C = ti.zero(self.C[p])
+            for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
+                dpos = (offset - fx) * self.dx
+                weight = ti.cast(1.0, self.real)
+                for i in ti.static(range(self.dim)):
+                    weight *= w[offset[i]][i]
+
+                g_v = self.grid_v[base + offset] + dv[base + offset]
+                new_C += 4 * self.inv_dx * weight * g_v.outer_product(dpos)
+
+            self.F[p] = (ti.Matrix.identity(self.real, self.dim) + self.dt * new_C) @ self.old_F[p]
 
     @ti.kernel
     def build_initial_dv_for_newton(self):
@@ -291,15 +323,9 @@ class MlsMpmSolver(MPMSimulationBase):
         return ti.sqrt(norm_sq)
 
     def gradient_descent_solve(self):
-        self.diff_test.run(self.dv)
+        
         self.linear_solver.solve(self.compute_energy_gradient, self.dv, self.residual)
-
-        # for i in range(15):
-        #     self.compute_energy_gradient()
-        #     self.incremental_update(self.dv, self.dv, 10, self.residual)
-        #     residual_norm = self.compute_norm()
-        #     if ti.static(self.debug_mode):
-        #         print('\033[1;31mgradient_descent_iter = ', i, ', residual_norm = ', residual_norm, '\033[0m')
+        self.diff_test.run(self.dv)
 
     @ti.func
     def project(self, x: ti.template()):
@@ -389,7 +415,7 @@ if __name__ == '__main__':
     linear_solver = 'gradient_descent'
     dt = 1e-4
     if args.implicit:
-        dt = 2e-3
+        dt = 1e-3
 
     visualization_limit = dt
 
