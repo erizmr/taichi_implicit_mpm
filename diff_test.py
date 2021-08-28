@@ -9,19 +9,15 @@ class DiffTest:
                  dv,
                  total_energy,
                  compute_energy_gradient,
-                 update_simulation_state,
                  diff_test_perturbation_scale=1):
         self.dim = dim
         # These are two functions for computing the `total energy` and its gradient
         self.total_energy = total_energy
         self.compute_energy_gradient = compute_energy_gradient
-        self.update_simulation_state = update_simulation_state
 
         self.diff_test_perturbation_scale = diff_test_perturbation_scale
-        # self.e0 = self.total_energy()
         self.e0 = 0.0
         shape = dv.shape
-        self.x = ti.Vector.field(dim, dtype=ti.f32, shape=shape)
 
         # Generate a random small step
         step_nums = 1 * dim
@@ -43,9 +39,8 @@ class DiffTest:
         self.log_err_list = []
         self._initialized = False
 
-    def initialize(self, dv):
-        self.copy_to_field(self.x, dv)
-        self.e0 = self.total_energy(self.x)
+    def initialize(self):
+        self.e0 = self.total_energy()
         self.compute_energy_gradient(self.f0)
         self._initialized = True
 
@@ -70,23 +65,21 @@ class DiffTest:
             differential += (self.f0[I] + self.f1[I]).dot(self.step[I])
         return differential
 
-    def update_state(self, h):
-        self.update_step(h)
-        self.update_simulation_state(self.x)
+    def update_state(self, x, h):
+        self.update_step(x, h)
 
     @ti.kernel
-    def update_step(self, h: ti.f32):
-        for I in ti.grouped(self.x):
-            self.x[I] += h * self.step[I]
+    def update_step(self, x: ti.template(), h: ti.f32):
+        for I in ti.grouped(x):
+            x[I] += h * self.step[I]
 
     def run(self, dv, nums=10):
-        self.initialize(dv)
+        self.initialize()
         assert self._initialized
         for i in range(nums):
-            self.copy_to_field(self.x, dv)
             h = self.diff_test_perturbation_scale * 2 ** (-i)
-            self.update_state(h)
-            e1 = self.total_energy(self.x)
+            self.update_state(dv, h)
+            e1 = self.total_energy()
             self.compute_energy_gradient(self.f1)
             difference = (self.e0 - e1) / h
             differential = self.compute_differential() / 2

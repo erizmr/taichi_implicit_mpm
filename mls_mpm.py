@@ -68,8 +68,7 @@ class MlsMpmSolver(MPMSimulationBase):
             # Define a diff test object
             self.diff_test = DiffTest(self.dim, self.dv,
                                       self.total_energy,
-                                      self.compute_energy_gradient,
-                                      self.update_state)
+                                      self.compute_energy_gradient)
 
     def initialize(self):
         self.simulation_initialize()
@@ -201,7 +200,6 @@ class MlsMpmSolver(MPMSimulationBase):
         self.restore_strain()
         self.construct_new_velocity_from_newton_result()
 
-
     @ti.func
     def psi(self, F):  # strain energy density function Ψ(F)
         U, sig, V = ti.svd(F)
@@ -216,47 +214,47 @@ class MlsMpmSolver(MPMSimulationBase):
         return 2 * self.mu_0 * (F - R) + self.lambda_0 * (J - 1) * J * F.inverse().transpose()
 
     @ti.kernel
-    def total_energy(self, x: ti.template()) -> ti.f32:
+    def total_energy(self) -> ti.f32:
         result = ti.cast(0.0, self.real)
         # elastic potential energy
         for p in self.F:
             result += self.psi(self.F[p]) * self.p_vol  # gathered from particles, psi defined in the rest space
-        print('after elastic', result)
-
+        # print('after elastic', result)
+ 
         # inertia energy
-        for I in ti.grouped(x):
+        for I in ti.grouped(self.dv):
             m = self.mass_matrix[I]
-            dv = x[I]
+            dv = self.dv[I]
             result += m * dv.dot(dv) / 2
-        print('after inertia', result)
+        # print('after inertia', result)
 
         # gravity potential
-        for I in ti.grouped(x):
+        for I in ti.grouped(self.dv):
             m = self.mass_matrix[I]
             for i in ti.static(range(self.dim)):
                 result -= self.dt * m * self.gravity[i]
-        print('after gravity', result)
+        # print('after gravity', result)
         return result
 
-    @ti.kernel
-    def update_state(self, dv: ti.template()):
-        ti.block_dim(self.n_grid)
-        for p in self.x:
-            Xp = self.x[p] * self.inv_dx
-            base = int(Xp - 0.5)
-            fx = Xp - base
-            w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
-            new_C = ti.zero(self.C[p])
-            for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
-                dpos = (offset - fx) * self.dx
-                weight = ti.cast(1.0, self.real)
-                for i in ti.static(range(self.dim)):
-                    weight *= w[offset[i]][i]
-
-                g_v = self.grid_v[base + offset] + dv[base + offset]
-                new_C += 4 * self.inv_dx * weight * g_v.outer_product(dpos)
-
-            self.F[p] = (ti.Matrix.identity(self.real, self.dim) + self.dt * new_C) @ self.old_F[p]
+    # @ti.kernel
+    # def update_state(self, dv: ti.template()):
+    #     ti.block_dim(self.n_grid)
+    #     for p in self.x:
+    #         Xp = self.x[p] * self.inv_dx
+    #         base = int(Xp - 0.5)
+    #         fx = Xp - base
+    #         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
+    #         new_C = ti.zero(self.C[p])
+    #         for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
+    #             dpos = (offset - fx) * self.dx
+    #             weight = ti.cast(1.0, self.real)
+    #             for i in ti.static(range(self.dim)):
+    #                 weight *= w[offset[i]][i]
+    #
+    #             g_v = self.grid_v[base + offset] + dv[base + offset]
+    #             new_C += 4 * self.inv_dx * weight * g_v.outer_product(dpos)
+    #
+    #         self.F[p] = (ti.Matrix.identity(self.real, self.dim) + self.dt * new_C) @ self.old_F[p]
 
     @ti.kernel
     def build_initial_dv_for_newton(self):
