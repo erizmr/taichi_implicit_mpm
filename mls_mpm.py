@@ -1,21 +1,25 @@
 import taichi as ti
 from mpm_base import MPMSimulationBase
 from gradient_descent import GradientDescentSolver
+from conjugate_gradient import ConjugateGradientSolver
 from diff_test import DiffTest
 ti.init(arch=ti.cuda)
 
 
 @ti.data_oriented
 class MlsMpmSolver(MPMSimulationBase):
-    def __init__(self, dt=1e-4, dim=2, gravity=9.8, gravity_dim=1, implicit=False, linear_solver=None):
+    def __init__(self, dt=1e-4, dim=2, gravity=9.8, gravity_dim=1,
+                 implicit=False,
+                 linear_solver=None,
+                 diff_test=False):
         super(MlsMpmSolver, self).__init__(implicit=implicit)
-        if linear_solver == 'gradient_descent':
-            self.linear_solver = GradientDescentSolver(max_iterations=15, adaptive_step_size=False)
         self.dim = dim
         self.real = ti.f32
         self.quality = 1  # Use a larger value for higher-res simulations
         self.ignore_collision = True
         self.debug_mode = True
+        self.linear_solver = linear_solver
+        self.diff_test = diff_test
         self.n_particles, self.n_grid = 9000 * self.quality ** 2, 128 * self.quality
         self.n_nodes = self.n_grid ** self.dim
         self.bound = 3  # boundary of the simulation domain
@@ -65,10 +69,23 @@ class MlsMpmSolver(MPMSimulationBase):
             self.dv = ti.Vector.field(dim, dtype=self.real, shape=(self.n_grid,)*self.dim)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
             self.residual = ti.Vector.field(dim, dtype=self.real, shape=(self.n_grid,)*self.dim)
 
-            # Define a diff test object
-            self.diff_test = DiffTest(self.dim, self.dv,
-                                      self.total_energy,
-                                      self.compute_energy_gradient)
+            if self.diff_test:
+                # Define a diff test object
+                self.diff_test = DiffTest(self.dim, self.dv,
+                                          self.total_energy,
+                                          self.compute_energy_gradient)
+
+            # These should be updated everytime a new SVD is performed to F
+            if ti.static(dim == 2):
+                self.psi0 = ti.field(dtype=real, shape=n_particles)  # d_PsiHat_d_sigma0
+                self.psi1 = ti.field(dtype=real, shape=n_particles)  # d_PsiHat_d_sigma1
+                self.psi00 = ti.field(dtype=real, shape=n_particles)  # d^2_PsiHat_d_sigma0_d_sigma0
+                self.psi01 = ti.field(dtype=real, shape=n_particles)  # d^2_PsiHat_d_sigma0_d_sigma1
+                self.psi11 = ti.field(dtype=real, shape=n_particles)  # d^2_PsiHat_d_sigma1_d_sigma1
+                self.m01 = ti.field(dtype=real,
+                                    shape=n_particles)  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
+                self.p01 = ti.field(dtype=real,
+                                    shape=n_particles)  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
 
     def initialize(self):
         self.simulation_initialize()
@@ -202,16 +219,87 @@ class MlsMpmSolver(MPMSimulationBase):
 
     @ti.func
     def psi(self, F):  # strain energy density function Ψ(F)
+        # The Material Point Method for the Physics-based of Solids and Fluids, Page: 20, Eqn: 49
         U, sig, V = ti.svd(F)
         # fixed corotated model, you can replace it with any constitutive model
         return self.mu_0 * (F - U @ V.transpose()).norm() ** 2 + self.lambda_0 / 2 * (F.determinant() - 1) ** 2
 
     @ti.func
     def dpsi_dF(self, F):  # first Piola-Kirchoff stress P(F), i.e. ∂Ψ/∂F
+        # The Material Point Method for the Physics-based of Solids and Fluids, Page: 20, Eqn: 52
         U, sig, V = ti.svd(F)
         J = F.determinant()
         R = U @ V.transpose()
         return 2 * self.mu_0 * (F - R) + self.lambda_0 * (J - 1) * J * F.inverse().transpose()
+
+    @ti.func
+    def first_piola_differential(self, p, F, dF):
+        # The Material Point Method for the Physics-based of Solids and Fluids, Page: 22, Eqn: 69
+        U, sig, V = ti.svd(F)
+        D = U.transpose() @ dF @ V
+        K = ti.Matrix.zero(self.real, self.dim, self.dim)
+        self.dPdF_of_sigma_contract(p, D, K)
+        return U @ K @ V.transpose()
+
+    @ti.func
+    def compute_stress_differential(self, p, grad_dv: ti.template(), dstress: ti.template(), dvp: ti.template()):
+        Fn_local = self.old_F[p]
+        dP = self.first_piola_differential(p, Fn_local, grad_dv @ Fn_local)
+        dstress += self.p_vol * dP @ Fn_local.transpose()
+
+    # B = dPdF(Sigma) : A
+    @ti.func
+    def dPdF_of_sigma_contract(self, p, A, B: ti.template()):
+        if ti.static(self.dim == 2):
+            B[0, 0] = self.psi00[p] * A[0, 0] + self.psi01[p] * A[1, 1]
+            B[1, 1] = self.psi01[p] * A[0, 0] + self.psi11[p] * A[1, 1]
+            B[0, 1] = ((self.m01[p] + self.p01[p]) * A[0, 1] + (self.m01[p] - self.p01[p]) * A[1, 0]) * 0.5
+            B[1, 0] = ((self.m01[p] - self.p01[p]) * A[0, 1] + (self.m01[p] + self.p01[p]) * A[1, 0]) * 0.5
+        # if ti.static(self.dim == 3):
+        #     B[0, 0] = self.Aij[p][0, 0] * A[0, 0] + self.Aij[p][0, 1] * A[1, 1] + self.Aij[p][0, 2] * A[2, 2]
+        #     B[1, 1] = self.Aij[p][1, 0] * A[0, 0] + self.Aij[p][1, 1] * A[1, 1] + self.Aij[p][1, 2] * A[2, 2]
+        #     B[2, 2] = self.Aij[p][2, 0] * A[0, 0] + self.Aij[p][2, 1] * A[1, 1] + self.Aij[p][2, 2] * A[2, 2]
+        #     B[0, 1] = self.B01[p][0, 0] * A[0, 1] + self.B01[p][0, 1] * A[1, 0]
+        #     B[1, 0] = self.B01[p][1, 0] * A[0, 1] + self.B01[p][1, 1] * A[1, 0]
+        #     B[0, 2] = self.B20[p][0, 0] * A[0, 2] + self.B20[p][0, 1] * A[2, 0]
+        #     B[2, 0] = self.B20[p][1, 0] * A[0, 2] + self.B20[p][1, 1] * A[2, 0]
+        #     B[1, 2] = self.B12[p][0, 0] * A[1, 2] + self.B12[p][0, 1] * A[2, 1]
+        #     B[2, 1] = self.B12[p][1, 0] * A[1, 2] + self.B12[p][1, 1] * A[2, 1]
+
+    @ti.func
+    def reinitialize_isotropic_helper(self, p):
+        if ti.static(self.dim == 2):
+            self.psi0[p] = 0  # d_PsiHat_d_sigma0
+            self.psi1[p] = 0  # d_PsiHat_d_sigma1
+            self.psi00[p] = 0  # d^2_PsiHat_d_sigma0_d_sigma0
+            self.psi01[p] = 0  # d^2_PsiHat_d_sigma0_d_sigma1
+            self.psi11[p] = 0  # d^2_PsiHat_d_sigma1_d_sigma1
+            self.m01[p] = 0  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
+            self.p01[p] = 0  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
+            self.Aij[p] = ti.zero(self.Aij[p])
+            self.B01[p] = ti.zero(self.B01[p])
+
+    @ti.func
+    def update_isotropic_helper(self, p, F):
+        self.reinitialize_isotropic_helper(p)
+        if ti.static(self.dim == 2):
+            U, sigma, V = ti.svd(F)
+            J = sigma[0, 0] * sigma[1, 1]
+            _2mu = self.mu_0 * 2
+            _lambda = self.lambda_0 * (J - 1)
+            Sprod = ti.Vector([sigma[1, 1], sigma[0, 0]])
+            self.psi0[p] = _2mu * (sigma[0, 0] - 1) + _lambda * Sprod[0]
+            self.psi1[p] = _2mu * (sigma[1, 1] - 1) + _lambda * Sprod[1]
+            self.psi00[p] = _2mu + self.lambda_0 * Sprod[0] * Sprod[0]
+            self.psi11[p] = _2mu + self.lambda_0 * Sprod[1] * Sprod[1]
+            self.psi01[p] = _lambda + self.lambda_0 * Sprod[0] * Sprod[1]
+
+            # (psi0-psi1)/(sigma0-sigma1)
+            self.m01[p] = _2mu - _lambda
+
+            # (psi0+psi1)/(sigma0+sigma1)
+            self.p01[p] = (self.psi0[p] + self.psi1[p]) / self.clamp_small_magnitude(sigma[0, 0] + sigma[1, 1], 1e-6)
+
 
     @ti.kernel
     def total_energy(self) -> ti.f32:
@@ -321,9 +409,12 @@ class MlsMpmSolver(MPMSimulationBase):
         return ti.sqrt(norm_sq)
 
     def gradient_descent_solve(self):
-        
         self.linear_solver.solve(self.compute_energy_gradient, self.dv, self.residual)
-        self.diff_test.run(self.dv)
+        if self.diff_test:
+            self.diff_test.run(self.dv)
+
+    def newton_solve(self):
+        pass
 
     @ti.func
     def project(self, x: ti.template()):
@@ -410,13 +501,18 @@ if __name__ == '__main__':
 
     gui = ti.GUI("Taichi MLS-MPM", res=512, background_color=0x112F41)
 
-    linear_solver = 'gradient_descent'
+    linear_solver_type = 'gradient_descent'
     dt = 1e-4
     if args.implicit:
         dt = 1e-3
 
     visualization_limit = dt
-
+    linear_solver = None
+    if linear_solver_type == 'gradient_descent':
+        linear_solver = GradientDescentSolver(max_iterations=15, adaptive_step_size=False)
+    elif linear_solver_type == 'conjugate_gradient':
+        linear_solver = ConjugateGradientSolver
+        
     solver = MlsMpmSolver(dt=dt, gravity=0.0, implicit=args.implicit, linear_solver=linear_solver)
     solver.initialize()
     while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
