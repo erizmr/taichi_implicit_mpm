@@ -18,6 +18,7 @@ class DiffTest:
         self.diff_test_perturbation_scale = diff_test_perturbation_scale
         self.e0 = 0.0
         shape = dv.shape
+        self.dv0 = ti.Vector.field(dim, dtype=ti.f32, shape=shape)
 
         # Generate a random small step
         step_nums = 1 * dim
@@ -39,9 +40,10 @@ class DiffTest:
         self.log_err_list = []
         self._initialized = False
 
-    def initialize(self):
+    def initialize(self, dv):
         self.e0 = self.total_energy()
         self.compute_energy_gradient(self.f0)
+        self.copy_to_field(self.dv0, dv)
         self._initialized = True
 
     @ti.kernel
@@ -65,26 +67,26 @@ class DiffTest:
             differential += (self.f0[I] + self.f1[I]).dot(self.step[I])
         return differential
 
-    def update_state(self, x, h):
-        self.update_step(x, h)
-
     @ti.kernel
     def update_step(self, x: ti.template(), h: ti.f32):
         for I in ti.grouped(x):
             x[I] += h * self.step[I]
 
     def run(self, dv, nums=10):
-        self.initialize()
+        self.initialize(dv)
         assert self._initialized
         for i in range(nums):
             h = self.diff_test_perturbation_scale * 2 ** (-i)
-            self.update_state(dv, h)
+            self.update_step(dv, h)
             e1 = self.total_energy()
             self.compute_energy_gradient(self.f1)
             difference = (self.e0 - e1) / h
             differential = self.compute_differential() / 2
             err = (difference - differential)
             log_err = np.log(abs(err))
+
+            # Recover the dv to dv0
+            self.copy_to_field(dv, self.dv0)
 
             self.err_list.append(err)
             self.log_err_list.append(log_err)

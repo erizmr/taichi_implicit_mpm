@@ -77,15 +77,15 @@ class MlsMpmSolver(MPMSimulationBase):
 
             # These should be updated everytime a new SVD is performed to F
             if ti.static(dim == 2):
-                self.psi0 = ti.field(dtype=real, shape=n_particles)  # d_PsiHat_d_sigma0
-                self.psi1 = ti.field(dtype=real, shape=n_particles)  # d_PsiHat_d_sigma1
-                self.psi00 = ti.field(dtype=real, shape=n_particles)  # d^2_PsiHat_d_sigma0_d_sigma0
-                self.psi01 = ti.field(dtype=real, shape=n_particles)  # d^2_PsiHat_d_sigma0_d_sigma1
-                self.psi11 = ti.field(dtype=real, shape=n_particles)  # d^2_PsiHat_d_sigma1_d_sigma1
-                self.m01 = ti.field(dtype=real,
-                                    shape=n_particles)  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
-                self.p01 = ti.field(dtype=real,
-                                    shape=n_particles)  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
+                self.psi0 = ti.field(dtype=self.real, shape=self.n_particles)  # d_PsiHat_d_sigma0
+                self.psi1 = ti.field(dtype=self.real, shape=self.n_particles)  # d_PsiHat_d_sigma1
+                self.psi00 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma0_d_sigma0
+                self.psi01 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma0_d_sigma1
+                self.psi11 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma1_d_sigma1
+                self.m01 = ti.field(dtype=self.real,
+                                    shape=self.n_particles)  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
+                self.p01 = ti.field(dtype=self.real,
+                                    shape=self.n_particles)  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
 
     def initialize(self):
         self.simulation_initialize()
@@ -300,7 +300,6 @@ class MlsMpmSolver(MPMSimulationBase):
             # (psi0+psi1)/(sigma0+sigma1)
             self.p01[p] = (self.psi0[p] + self.psi1[p]) / self.clamp_small_magnitude(sigma[0, 0] + sigma[1, 1], 1e-6)
 
-
     @ti.kernel
     def total_energy(self) -> ti.f32:
         result = ti.cast(0.0, self.real)
@@ -497,6 +496,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='MPM')
     parser.add_argument('--implicit', action='store_true',
                         help='implicit or not')
+    parser.add_argument('--difftest', action='store_true',
+                        help='implicit or not')
     args = parser.parse_args()
 
     gui = ti.GUI("Taichi MLS-MPM", res=512, background_color=0x112F41)
@@ -513,7 +514,7 @@ if __name__ == '__main__':
     elif linear_solver_type == 'conjugate_gradient':
         linear_solver = ConjugateGradientSolver
         
-    solver = MlsMpmSolver(dt=dt, gravity=0.0, implicit=args.implicit, linear_solver=linear_solver)
+    solver = MlsMpmSolver(dt=dt, gravity=0.0, implicit=args.implicit, linear_solver=linear_solver, diff_test=args.difftest)
     solver.initialize()
     while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
         for s in range(int(visualization_limit // solver.dt)):
