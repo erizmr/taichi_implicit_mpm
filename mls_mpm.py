@@ -74,6 +74,7 @@ class MlsMpmSolver(MPMSimulationBase):
                 self.diff_test = DiffTest(self.dim, self.dv,
                                           self.total_energy,
                                           self.compute_energy_gradient)
+            self.is_difftest_done = False
 
             # These should be updated everytime a new SVD is performed to F
             if ti.static(dim == 2):
@@ -409,8 +410,9 @@ class MlsMpmSolver(MPMSimulationBase):
 
     def gradient_descent_solve(self):
         self.linear_solver.solve(self.compute_energy_gradient, self.dv, self.residual)
-        if self.diff_test:
+        if self.diff_test and not self.is_difftest_done:
             self.diff_test.run(self.dv)
+            self.is_difftest_done = True
 
     def newton_solve(self):
         pass
