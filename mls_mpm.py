@@ -14,7 +14,7 @@ class MlsMpmSolver(MPMSimulationBase):
                  diff_test=False):
         super(MlsMpmSolver, self).__init__(implicit=implicit)
         self.dim = dim
-        self.real = ti.f32
+        self.real = ti.f64
         self.quality = 1  # Use a larger value for higher-res simulations
         self.ignore_collision = True
         self.debug_mode = True
@@ -71,9 +71,10 @@ class MlsMpmSolver(MPMSimulationBase):
 
             if self.diff_test:
                 # Define a diff test object
-                self.diff_test = DiffTest(self.dim, self.dv,
+                self.diff_test = DiffTest(self.dim, self.dv, self.n_particles,
                                           self.total_energy,
-                                          self.compute_energy_gradient)
+                                          self.compute_energy_gradient,
+                                          self.update_state)
             self.is_difftest_done = False
 
             # These should be updated everytime a new SVD is performed to F
@@ -134,7 +135,7 @@ class MlsMpmSolver(MPMSimulationBase):
 
             # JELLY ONLY
             if self.material[p] == 1 or self.material[p] == 0:  # jelly, make it softer
-                h = 0.3
+                h = ti.cast(0.3, self.real)
 
             mu, la = self.mu_0 * h, self.lambda_0 * h
 
@@ -142,8 +143,8 @@ class MlsMpmSolver(MPMSimulationBase):
             # if self.material[p] == 0:  # liquid
             #     mu = 0.0
 
-            U, sig, V = ti.svd(self.F[p])
-            J = 1.0
+            U, sig, V = ti.svd(self.F[p], self.real)
+            J = ti.cast(1.0, self.real)
             for d in ti.static(range(2)):
                 new_sig = sig[d, d]
                 if self.material[p] == 2:  # Snow
@@ -221,14 +222,15 @@ class MlsMpmSolver(MPMSimulationBase):
     @ti.func
     def psi(self, F):  # strain energy density function Ψ(F)
         # The Material Point Method for the Physics-based of Solids and Fluids, Page: 20, Eqn: 49
-        U, sig, V = ti.svd(F)
+        U, sig, V = ti.svd(F, self.real)
         # fixed corotated model, you can replace it with any constitutive model
         return self.mu_0 * (F - U @ V.transpose()).norm() ** 2 + self.lambda_0 / 2 * (F.determinant() - 1) ** 2
+        # return self.mu_0 * (sig - ti.Matrix([[1.0, 0.0], [0.0, 1.0]])).norm() ** 2 + self.lambda_0 / 2 * (F.determinant() - 1) ** 2
 
     @ti.func
     def dpsi_dF(self, F):  # first Piola-Kirchoff stress P(F), i.e. ∂Ψ/∂F
         # The Material Point Method for the Physics-based of Solids and Fluids, Page: 20, Eqn: 52
-        U, sig, V = ti.svd(F)
+        U, sig, V = ti.svd(F, self.real)
         J = F.determinant()
         R = U @ V.transpose()
         return 2 * self.mu_0 * (F - R) + self.lambda_0 * (J - 1) * J * F.inverse().transpose()
@@ -236,7 +238,7 @@ class MlsMpmSolver(MPMSimulationBase):
     @ti.func
     def first_piola_differential(self, p, F, dF):
         # The Material Point Method for the Physics-based of Solids and Fluids, Page: 22, Eqn: 69
-        U, sig, V = ti.svd(F)
+        U, sig, V = ti.svd(F, self.real)
         D = U.transpose() @ dF @ V
         K = ti.Matrix.zero(self.real, self.dim, self.dim)
         self.dPdF_of_sigma_contract(p, D, K)
@@ -284,7 +286,7 @@ class MlsMpmSolver(MPMSimulationBase):
     def update_isotropic_helper(self, p, F):
         self.reinitialize_isotropic_helper(p)
         if ti.static(self.dim == 2):
-            U, sigma, V = ti.svd(F)
+            U, sigma, V = ti.svd(F, self.real)
             J = sigma[0, 0] * sigma[1, 1]
             _2mu = self.mu_0 * 2
             _lambda = self.lambda_0 * (J - 1)
@@ -302,7 +304,7 @@ class MlsMpmSolver(MPMSimulationBase):
             self.p01[p] = (self.psi0[p] + self.psi1[p]) / self.clamp_small_magnitude(sigma[0, 0] + sigma[1, 1], 1e-6)
 
     @ti.kernel
-    def total_energy(self) -> ti.f32:
+    def total_energy(self) -> ti.f64:
         result = ti.cast(0.0, self.real)
         # elastic potential energy
         for p in self.F:
@@ -317,32 +319,32 @@ class MlsMpmSolver(MPMSimulationBase):
         # print('after inertia', result)
 
         # gravity potential
-        for I in ti.grouped(self.dv):
-            m = self.mass_matrix[I]
-            for i in ti.static(range(self.dim)):
-                result -= self.dt * m * self.gravity[i]
+        # for I in ti.grouped(self.dv):
+        #     m = self.mass_matrix[I]
+        #     for i in ti.static(range(self.dim)):
+        #         result -= self.dt * m * self.gravity[i]
         # print('after gravity', result)
         return result
 
-    # @ti.kernel
-    # def update_state(self, dv: ti.template()):
-    #     ti.block_dim(self.n_grid)
-    #     for p in self.x:
-    #         Xp = self.x[p] * self.inv_dx
-    #         base = int(Xp - 0.5)
-    #         fx = Xp - base
-    #         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
-    #         new_C = ti.zero(self.C[p])
-    #         for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
-    #             dpos = (offset - fx) * self.dx
-    #             weight = ti.cast(1.0, self.real)
-    #             for i in ti.static(range(self.dim)):
-    #                 weight *= w[offset[i]][i]
-    #
-    #             g_v = self.grid_v[base + offset] + dv[base + offset]
-    #             new_C += 4 * self.inv_dx * weight * g_v.outer_product(dpos)
-    #
-    #         self.F[p] = (ti.Matrix.identity(self.real, self.dim) + self.dt * new_C) @ self.old_F[p]
+    @ti.kernel
+    def update_state(self, dv: ti.template()):
+        ti.block_dim(self.n_grid)
+        for p in self.x:
+            Xp = self.x[p] * self.inv_dx
+            base = int(Xp - 0.5)
+            fx = Xp - base
+            w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
+            new_C = ti.zero(self.C[p])
+            for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
+                dpos = (offset - fx) * self.dx
+                weight = ti.cast(1.0, self.real)
+                for i in ti.static(range(self.dim)):
+                    weight *= w[offset[i]][i]
+
+                g_v = self.grid_v[base + offset] + dv[base + offset]
+                new_C += 4 * self.inv_dx * self.inv_dx  * weight * g_v.outer_product(dpos)
+
+            self.F[p] = (ti.Matrix.identity(self.real, self.dim) + self.dt * new_C) @ self.old_F[p]
 
     @ti.kernel
     def build_initial_dv_for_newton(self):
@@ -394,12 +396,12 @@ class MlsMpmSolver(MPMSimulationBase):
                 self.mass_matrix[I] = mass
 
     @ti.kernel
-    def incremental_update(self, dst: ti.template(), src: ti.template(), rate: ti.f32, step_direction: ti.template()):
+    def incremental_update(self, dst: ti.template(), src: ti.template(), rate: ti.f64, step_direction: ti.template()):
         for I in ti.grouped(src):
             dst[I] = src[I] + rate * step_direction[I]
 
     @ti.kernel
-    def compute_norm(self) -> ti.f32:
+    def compute_norm(self) -> ti.f64:
         norm_sq = ti.cast(0.0, self.real)
         for I in ti.grouped(self.dv):
             mass = self.mass_matrix[I]
@@ -411,7 +413,7 @@ class MlsMpmSolver(MPMSimulationBase):
     def gradient_descent_solve(self):
         self.linear_solver.solve(self.compute_energy_gradient, self.dv, self.residual)
         if self.diff_test and not self.is_difftest_done:
-            self.diff_test.run(self.dv)
+            self.diff_test.run(self.dv, self.F)
             self.is_difftest_done = True
 
     def newton_solve(self):
@@ -430,8 +432,11 @@ class MlsMpmSolver(MPMSimulationBase):
     @ti.kernel
     def compute_energy_gradient(self, residual: ti.template()):
         # Compute the RHS (i.e. usually energy gradient) of the linear system
+        # for I in ti.grouped(self.dv):
+        #     self.residual[I] = self.dt * self.mass_matrix[I] * self.gravity
+
         for I in ti.grouped(self.dv):
-            self.residual[I] = self.dt * self.mass_matrix[I] * self.gravity
+            self.residual[I] = [0.0, 0.0]
 
         for I in ti.grouped(self.dv):
             self.residual[I] -= self.mass_matrix[I] * self.dv[I]
@@ -452,7 +457,7 @@ class MlsMpmSolver(MPMSimulationBase):
 
                 # g_v = self.grid_v[base + offset] + self.dv[self.idx(base + offset)]
                 g_v = self.grid_v[base + offset] + self.dv[base + offset]
-                new_C += 4 * self.inv_dx * weight * g_v.outer_product(dpos)
+                new_C += 4 * self.inv_dx * self.inv_dx * weight * g_v.outer_product(dpos)
 
             F = (ti.Matrix.identity(self.real, self.dim) + self.dt * new_C) @ self.old_F[p]
             stress = (-self.p_vol * 4 * self.inv_dx * self.inv_dx) * self.dpsi_dF(F) @ self.old_F[p].transpose()
