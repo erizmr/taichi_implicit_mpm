@@ -2,6 +2,7 @@ import taichi as ti
 from mpm_base import MPMSimulationBase
 from gradient_descent import GradientDescentSolver
 from conjugate_gradient import ConjugateGradientSolver
+from newton_optimization_solver import NewtonSolver
 from diff_test import DiffTest
 ti.init(arch=ti.cuda)
 
@@ -21,6 +22,7 @@ class MlsMpmSolver(MPMSimulationBase):
         self.optimization_solver = optimization_solver
         self.diff_test = diff_test
         self.n_particles, self.n_grid = 9000 * self.quality ** 2, 128 * self.quality
+        self.grid_shape = (self.n_grid,)*self.dim
         self.n_nodes = self.n_grid ** self.dim
         self.bound = 3  # boundary of the simulation domain
         self.neighbour = (3,) * self.dim
@@ -47,12 +49,12 @@ class MlsMpmSolver(MPMSimulationBase):
 
         # Quantities defined on grid
         self.grid_v = ti.Vector.field(self.dim, dtype=self.real,
-                                 shape=(self.n_grid,)*self.dim)  # grid node momentum/velocity
+                                 shape=self.grid_shape)  # grid node momentum/velocity
 
         self.grid_v_new = ti.Vector.field(self.dim, dtype=self.real,
-                                 shape=(self.n_grid,)*self.dim)  # new grid node momentum, also used for store forces temporally
+                                 shape=self.grid_shape)  # new grid node momentum, also used for store forces temporally
 
-        self.grid_m = ti.field(dtype=self.real, shape=(self.n_grid,)*self.dim)  # grid node mass
+        self.grid_m = ti.field(dtype=self.real, shape=self.grid_shape)  # grid node mass
 
         if implicit:
             assert optimization_solver
@@ -65,9 +67,9 @@ class MlsMpmSolver(MPMSimulationBase):
             # self.residual = ti.Vector.field(dim, dtype=self.real, shape=self.n_nodes)
 
             # Quantities for linear solver
-            self.mass_matrix = ti.field(dtype=self.real, shape=(self.n_grid,)*self.dim)
-            self.dv = ti.Vector.field(dim, dtype=self.real, shape=(self.n_grid,)*self.dim)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
-            self.residual = ti.Vector.field(dim, dtype=self.real, shape=(self.n_grid,)*self.dim)
+            self.mass_matrix = ti.field(dtype=self.real, shape=self.grid_shape)
+            self.dv = ti.Vector.field(dim, dtype=self.real, shape=self.grid_shape)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
+            self.residual = ti.Vector.field(dim, dtype=self.real, shape=self.grid_shape)
 
             if self.diff_test:
                 # Define a diff test object
@@ -91,6 +93,10 @@ class MlsMpmSolver(MPMSimulationBase):
 
     def initialize(self):
         self.simulation_initialize()
+        functions_dict = {"multiply": self.multiply,
+                          "compute_residual": self.compute_energy_gradient,
+                          "update_simulation_state": self.update_state}
+        self.optimization_solver.initialize(self.dim, self.grid_shape, functions_dict)
 
     # TODO: currently 2D only
     @ti.kernel
@@ -408,7 +414,7 @@ class MlsMpmSolver(MPMSimulationBase):
         return ti.sqrt(norm_sq)
 
     def gradient_descent_solve(self):
-        self.optmization_solver.solve(self.compute_energy_gradient, self.dv, self.residual)
+        self.optimization_solver.solve(self.compute_energy_gradient, self.dv, self.residual)
         if self.diff_test and not self.is_difftest_done:
             self.diff_test.run(self.dv, self.F)
             self.is_difftest_done = True
@@ -577,12 +583,12 @@ if __name__ == '__main__':
     if optimization_solver_type == 'gradient_descent':
         optimization_solver = GradientDescentSolver(max_iterations=15, adaptive_step_size=False)
     elif optmization_solver_type == 'conjugate_gradient':
-        optimization_solver = ConjugateGradientSolver
+        optimization_solver = NewtonSolver(max_iteartions=10)
         
     solver = MlsMpmSolver(dt=dt, 
                           gravity=9.8, 
                           implicit=args.implicit, 
-                          optimization_solver=linear_solver, 
+                          optimization_solver=optimization_solver, 
                           diff_test=args.difftest)
     solver.initialize()
     while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):

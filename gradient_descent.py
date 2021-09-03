@@ -11,7 +11,7 @@ class GradientDescentSolver:
         self.x_last_step = None
         self.step_direction_last_step = None
 
-    def initialize(self):
+    def initialize(self, dim, shape, functions_dict):
         pass
 
     def _initialize_buffer(self, dim, shape):

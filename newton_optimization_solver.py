@@ -3,24 +3,27 @@ from conjugate_gradient import ConjugateGradientSolver
 
 
 class NewtonSolver:
-    def __init__(self, dim, shape, dtype=ti.f32, max_iterations=10, tolerance=1e-3):
+    def __init__(self, dtype=ti.f32, max_iterations=10, tolerance=1e-3):
         self.dtype = dtype
         self.max_iterations = max_iterations
         self.tolerance = tolerance
-        self.step_direction = ti.Vector.field(dim, dtype=dtype, shape=shape)
-        # Define a CG solver
-        self.linear_solver = ConjugateGradientSolver(dim=dim, shape=shape)
-
+        self.step_direction = None
+        self.linear_solver = None
         # Simulation specific functions
         self.multiply = None
         self.compute_residual = None
         self.update_simulation_state = None
         
-    def initialize(self, multiply, compute_residual, update_simulation_state):
-        self.multiply = multiply
-        self.linear_solver.initialize(multiply)
-        self.compute_residual = compute_residual
-        self.update_simulation_state = update_simulation_state
+    def initialize(self, dim, shape, functions_dict):
+        self.step_direction = ti.Vector.field(dim, dtype=dtype, shape=shape)
+        # Define a CG solver
+        self.linear_solver = ConjugateGradientSolver(dim=dim, shape=shape)
+
+        # Get the simulation specific functions
+        self.multiply = functions_dict["multiply"]
+        self.linear_solver.initialize(self.multiply)
+        self.compute_residual = functions_dict["compute_residual"]
+        self.update_simulation_state = functions_dict["update_simulation_state"]
     
     @ti.kernel
     def compute_residual_norm(self, x: ti.template()) -> ti.f32:
