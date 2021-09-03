@@ -3,25 +3,29 @@ import taichi as ti
 
 @ti.data_oriented
 class ConjugateGradientSolver:
-    def __init__(self, dim, shape, max_iterations=10, relative_tolerance=1e-3):
+    def __init__(self, max_iterations=20, relative_tolerance=1e-3):
         self.max_iterations = max_iterations
         self.relative_tolerance = relative_tolerance
-        self.dim = dim
-        self.r = ti.Vector.field(dim, shape=shape)
-        self.p = ti.Vector.field(dim, shape=shape)
-        self.q = ti.Vector.field(dim, shape=shape)
-        self.Ap = ti.Vector.field(dim, shape=shape)
-        self.sum = ti.field(ti.f32, shape=())
+        self.r, self.p, self.q, self.Ap, self.sum = None, None, None, None, None
+        self.dtype = ti.f32
+        self.dim = None
         self.multiply = None
     
-    def initialize(self, multiply):
+    def initialize(self, dim, shape, functions_dict, dtype=ti.f32):
         # Function to compute the Ap in CG
-        self.multiply = multiply
+        self.multiply = functions_dict["multiply"]
+        self.dim = dim
+        
+        self.r = ti.Vector.field(dim, shape=shape, dtype=dtype)
+        self.p = ti.Vector.field(dim, shape=shape, dtype=dtype)
+        self.q = ti.Vector.field(dim, shape=shape, dtype=dtype)
+        self.Ap = ti.Vector.field(dim, shape=shape, dtype=dtype)
+        self.sum = ti.field(dtype=dtype, shape=())
         
     @ti.kernel
     def reinitialize(self):
         for I in ti.grouped(self.r):
-            for d in ti.static(self.dim):
+            for d in ti.static(range(self.dim)):
                 self.r[I][d] = 0.
                 self.p[I][d] = 0.
                 self.q[I][d] = 0.
@@ -35,7 +39,7 @@ class ConjugateGradientSolver:
         return result
 
     @ti.kernel
-    def dot_product(self, a: ti.template(), b: ti.template()):
+    def dot_product(self, a: ti.template(), b: ti.template()) -> ti.f32:
         result = 0.0
         for I in ti.grouped(a):
             result += a[I].dot(b[I])
@@ -62,6 +66,11 @@ class ConjugateGradientSolver:
             self.r[I] = b[I] - self.Ap[I]
 
     @ti.kernel
+    def compute_difference(self, dst:ti.template(), src1:ti.template(), src2:ti.template()):
+        for I in ti.grouped(dst):
+            dst[I] = src1[I] - src2[I]
+
+    @ti.kernel
     def compute_norm(self, x: ti.template()) -> ti.f32:
         result = 0.0
         for I in ti.grouped(x):
@@ -69,24 +78,28 @@ class ConjugateGradientSolver:
         return ti.sqrt(result)
 
     def solve(self, x, b):
-        
+
         assert self.multiply is not None
-        
+
         self.reinitialize()
+        # CLear x
         self.multiply(x, self.Ap)
         self.compute_residual(b)
+        self.compute_difference(self.r, b, self.Ap)
+
         rkTrk = self.reduction(self.r)
         self.copy(self.p, self.r)
         residual_norm = self.compute_norm(self.r)
 
         for i in range(self.max_iterations):
             if residual_norm < self.relative_tolerance * residual_norm:
-                print(f"CG terminated at {i}, Residual norm = {residual_norm}")
+                print(f"\033[1;31m CG terminated at {i}, Residual norm = {residual_norm} \033[0m")
                 break
-            if i % 10 == 0:
-                print(f"CG iteration: {i}, Residual norm = {residual_norm}")
-
+            if i % 1 == 0:
+                print(f"\033[1;31m CG iteration: {i}, Residual norm = {residual_norm} \033[0m")
+                pass
             self.multiply(self.p, self.Ap)
+
             alpha = rkTrk / self.dot_product(self.Ap, self.p)
 
             # Update x
@@ -96,8 +109,9 @@ class ConjugateGradientSolver:
             residual_norm = self.compute_norm(self.r)
 
             rkTrk_last = rkTrk
+
             rkTrk = self.reduction(self.r)
             beta = rkTrk / rkTrk_last
-
+            print("rkTrk ", rkTrk, "alpha ", alpha, "beta ", beta)
             # Update p
             self.update_general(self.p, self.r, self.p, beta)

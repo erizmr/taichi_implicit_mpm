@@ -11,8 +11,10 @@ class DiffTest:
                  total_energy,
                  compute_energy_gradient,
                  update_simualtion_state,
-                 diff_test_perturbation_scale=1000):
+                 diff_test_perturbation_scale=1000,
+                 dtype=ti.f32):
         self.dim = dim
+        self.dtype = dtype
         # These are two functions for computing the `total energy` and its gradient
         self.total_energy = total_energy
         self.compute_energy_gradient = compute_energy_gradient
@@ -21,8 +23,8 @@ class DiffTest:
         self.diff_test_perturbation_scale = diff_test_perturbation_scale
         self.e0 = 0.0
         shape = dv.shape
-        self.dv0 = ti.Vector.field(dim, dtype=ti.f64, shape=shape)
-        self.F0 = ti.Matrix.field(dim, dim, dtype=ti.f64, shape=n_particles)
+        self.dv0 = ti.Vector.field(dim, dtype=self.dtype, shape=shape)
+        self.F0 = ti.Matrix.field(dim, dim, dtype=self.dtype, shape=n_particles)
 
         # Generate a random small step
         step_nums = 1 * dim
@@ -32,11 +34,11 @@ class DiffTest:
         step_data = np.random.rand(step_nums)
         step_data = step_data / np.sqrt(np.sum(step_data))
         print(step_data)
-        self.step = ti.Vector.field(dim, dtype=ti.f64, shape=shape)
+        self.step = ti.Vector.field(dim, dtype=self.dtype, shape=shape)
         self.copy_step_to_field(step_data)
 
-        self.f0 = ti.Vector.field(dim, dtype=ti.f64, shape=shape)
-        self.f1 = ti.Vector.field(dim, dtype=ti.f64, shape=shape)
+        self.f0 = ti.Vector.field(dim, dtype=self.dtype, shape=shape)
+        self.f1 = ti.Vector.field(dim, dtype=self.dtype, shape=shape)
 
         self.energy_difference_list = []
         self.energy_differential_list = []

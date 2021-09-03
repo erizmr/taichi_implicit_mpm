@@ -9,15 +9,18 @@ class GradientDescentSolver:
         self.adaptive_step_size = adaptive_step_size
         self.tolerance = tolerance
         self.x_last_step = None
+        self.step_direction = None
         self.step_direction_last_step = None
+        self.dtype = ti.f32
 
-    def initialize(self, dim, shape, functions_dict):
-        pass
+    def initialize(self, dim, shape, functions_dict, dtype=ti.f32):
+        self.dtype = dtype
+        self.step_direction = ti.Vector.field(dim, shape=shape, dtype=self.dtype)
 
     def _initialize_buffer(self, dim, shape):
         assert self.adaptive_step_size
-        self.step_direction_last_step = ti.Vector.field(dim, dtype=ti.f32)
-        self.x_last_step = ti.Vector.field(dim, dtype=ti.f32)
+        self.step_direction_last_step = ti.Vector.field(dim, dtype=self.dtype)
+        self.x_last_step = ti.Vector.field(dim, dtype=self.dtype)
         indices = ti.ijk if dim == 3 else ti.ij
         ti.root.dense(indices, shape).place(self.step_direction_last_step, self.x_last_step)
 
@@ -27,11 +30,11 @@ class GradientDescentSolver:
             self.x_last_step[I] = x[I]
             self.step_direction_last_step[I] = step_direction[I]
 
-    def solve(self, compute_gradient, x, step_direction):
+    def solve(self, compute_gradient, x):
         for n in range(self.max_iterations):
-            compute_gradient(step_direction)
-            self.update(x, step_direction)
-            residual_norm = self.compute_residual_norm(step_direction)
+            compute_gradient(self.step_direction)
+            self.update(x, self.step_direction)
+            residual_norm = self.compute_residual_norm(self.step_direction)
             if (n+1) % 50 == 0:
                 print(f'\033[1;36m [Gradient Descent] Iter = {n}, Residual Norm = {residual_norm}, Step size = {self.step_size} \033[0m')
             if residual_norm < self.tolerance:
@@ -39,11 +42,11 @@ class GradientDescentSolver:
                 break
             if self.adaptive_step_size:
                 if self.step_direction_last_step is not None:
-                    self.step_size = self._step_size_update(x, step_direction)
+                    self.step_size = self._step_size_update(x, self.step_direction)
                     # print(self.step_size)
                 else:
                     self._initialize_buffer(x.n, x.shape)
-                self.copy_buffer(x, step_direction)
+                self.copy_buffer(x, self.step_direction)
 
     @ti.kernel
     def compute_residual_norm(self, step_direction: ti.template()) -> ti.f32:
