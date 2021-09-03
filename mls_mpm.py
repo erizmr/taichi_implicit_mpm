@@ -78,6 +78,7 @@ class MlsMpmSolver(MPMSimulationBase):
                                           self.total_energy,
                                           self.compute_energy_gradient,
                                           self.update_state,
+                                          self.multiply,
                                           dtype=self.real)
             self.is_difftest_done = False
 

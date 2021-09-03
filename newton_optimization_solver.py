@@ -8,6 +8,7 @@ class NewtonSolver:
         self.dtype = ti.f32
         self.max_iterations = max_iterations
         self.tolerance = tolerance
+        self.dim = None
         self.step_direction = None
         self.residual = None
         self.linear_solver = None
@@ -16,8 +17,10 @@ class NewtonSolver:
         self.compute_residual = None
         self.update_simulation_state = None
         
+        
     def initialize(self, dim, shape, functions_dict, dtype=ti.f32):
         self.dtype = dtype
+        self.dim = dim
         self.step_direction = ti.Vector.field(dim, dtype=self.dtype, shape=shape)
         self.residual = ti.Vector.field(dim, dtype=self.dtype, shape=shape)
 
@@ -50,7 +53,8 @@ class NewtonSolver:
     @ti.kernel
     def clear_step_direction(self):
         for I in ti.grouped(self.step_direction):
-            self.step_direction[I] = [0.0, 0.0]
+            for d in ti.static(range(self.dim)):
+                self.step_direction[I][d] = 0.0
 
     def solve(self, x):
         assert self.multiply is not None
@@ -68,7 +72,8 @@ class NewtonSolver:
                 break
             if n % 1 == 0:
                 print(f'\033[1;36m [Newton] Iter = {n}, Residual Norm = {residual_norm} \033[0m')
-            self.clear_step_direction()
+
             self.linear_solve(self.step_direction, self.residual)
             self.update_step(x, self.step_direction, 1.0)
             self.update_simulation_state(x)
+            self.clear_step_direction()

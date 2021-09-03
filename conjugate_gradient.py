@@ -87,10 +87,10 @@ class ConjugateGradientSolver:
         self.compute_residual(b)
         self.compute_difference(self.r, b, self.Ap)
 
-        rkTrk = self.reduction(self.r)
+        rkTrk = abs(self.reduction(self.r))
         self.copy(self.p, self.r)
-        residual_norm = self.compute_norm(self.r)
-
+        # residual_norm = self.compute_norm(self.r)
+        residual_norm = ti.sqrt(rkTrk)
         for i in range(self.max_iterations):
             if residual_norm < self.relative_tolerance * residual_norm:
                 print(f"\033[1;31m CG terminated at {i}, Residual norm = {residual_norm} \033[0m")
@@ -99,7 +99,7 @@ class ConjugateGradientSolver:
                 print(f"\033[1;31m CG iteration: {i}, Residual norm = {residual_norm} \033[0m")
                 pass
             self.multiply(self.p, self.Ap)
-
+            print('dot result', self.dot_product(self.Ap, self.p))
             alpha = rkTrk / self.dot_product(self.Ap, self.p)
 
             # Update x
