@@ -13,7 +13,11 @@ class ConjugateGradientSolver:
         self.Ap = ti.Vector.field(dim, shape=shape)
         self.sum = ti.field(ti.f32, shape=())
         self.multiply = None
-
+    
+    def initialize(self, multiply):
+        # Function to compute the Ap in CG
+        self.multiply = multiply
+        
     @ti.kernel
     def reinitialize(self):
         for I in ti.grouped(self.r):
@@ -64,10 +68,10 @@ class ConjugateGradientSolver:
             result += x[I].dot(x[I])
         return ti.sqrt(result)
 
-    def solve(self, x, b, multiply):
-        # Function to compute the Ap in CG
-        self.multiply = multiply
-
+    def solve(self, x, b):
+        
+        assert self.multiply is not None
+        
         self.reinitialize()
         self.multiply(x, self.Ap)
         self.compute_residual(b)

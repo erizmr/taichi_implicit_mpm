@@ -28,21 +28,25 @@ class GradientDescentSolver:
             self.step_direction_last_step[I] = step_direction[I]
 
     def solve(self, compute_gradient, x, step_direction):
-        for _ in range(self.max_iterations):
+        for n in range(self.max_iterations):
             compute_gradient(step_direction)
             self.update(x, step_direction)
-            if self.compute_residual(step_direction) < self.tolerance:
+            residual_norm = self.compute_residual_norm(step_direction)
+            if (n+1) % 50 == 0:
+                print(f'\033[1;36m [Gradient Descent] Iter = {n}, Residual Norm = {residual_norm}, Step size = {self.step_size} \033[0m')
+            if residual_norm < self.tolerance:
+                print(f'\033[1;36m [Gradient Descent] Terminated at iter = {n}, Residual Norm = {residual_norm} \033[0m')
                 break
             if self.adaptive_step_size:
                 if self.step_direction_last_step is not None:
                     self.step_size = self._step_size_update(x, step_direction)
-                    print(self.step_size)
+                    # print(self.step_size)
                 else:
                     self._initialize_buffer(x.n, x.shape)
                 self.copy_buffer(x, step_direction)
 
     @ti.kernel
-    def compute_residual(self, step_direction: ti.template()) -> ti.f32:
+    def compute_residual_norm(self, step_direction: ti.template()) -> ti.f32:
         residual = 0.0
         for I in ti.grouped(step_direction):
             residual += step_direction[I].dot(step_direction[I])
