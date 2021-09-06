@@ -4,26 +4,27 @@ from gradient_descent import GradientDescentSolver
 from conjugate_gradient import ConjugateGradientSolver
 from newton_optimization_solver import NewtonSolver
 from diff_test import DiffTest
+
 ti.init(arch=ti.cuda)
 
 
 @ti.data_oriented
 class MlsMpmSolver(MPMSimulationBase):
-    def __init__(self, dt=1e-4, dim=2, gravity=9.8, 
+    def __init__(self, dt=1e-4, dim=2, gravity=9.8,
                  gravity_dim=1,
                  implicit=False,
                  optimization_solver=None,
                  diff_test=False):
         super(MlsMpmSolver, self).__init__(implicit=implicit)
         self.dim = dim
-        self.real = ti.f32
+        self.real = ti.f64
         self.quality = 1  # Use a larger value for higher-res simulations
         self.ignore_collision = True
         self.debug_mode = True
         self.optimization_solver_name, self.optimization_solver = optimization_solver
         self.diff_test = diff_test
         self.n_particles, self.n_grid = 9000 * self.quality ** 2, 128 * self.quality
-        self.grid_shape = (self.n_grid,)*self.dim
+        self.grid_shape = (self.n_grid,) * self.dim
         self.n_nodes = self.n_grid ** self.dim
         self.bound = 3  # boundary of the simulation domain
         self.neighbour = (3,) * self.dim
@@ -32,7 +33,7 @@ class MlsMpmSolver(MPMSimulationBase):
         self.dt = dt / self.quality
         self.p_vol, self.p_rho = (self.dx * 0.5) ** 2, 1
         self.p_mass = self.p_vol * self.p_rho
-        self.E, self.nu = 0.1e4, 0.2  # Young's modulus and Poisson's ratio
+        self.E, self.nu = 0.01e4, 0.2  # Young's modulus and Poisson's ratio
         self.mu_0, self.lambda_0 = self.E / (2 * (1 + self.nu)), self.E * self.nu / (
                 (1 + self.nu) * (1 - 2 * self.nu))  # Lame parameters
 
@@ -42,25 +43,25 @@ class MlsMpmSolver(MPMSimulationBase):
         self.x = ti.Vector.field(self.dim, dtype=self.real, shape=self.n_particles)  # position
         self.v = ti.Vector.field(self.dim, dtype=self.real, shape=self.n_particles)  # velocity
         self.C = ti.Matrix.field(self.dim, self.dim, dtype=self.real,
-                            shape=self.n_particles)  # affine velocity field
+                                 shape=self.n_particles)  # affine velocity field
         self.F = ti.Matrix.field(self.dim, self.dim, dtype=self.real,
-                            shape=self.n_particles)  # deformation gradient
+                                 shape=self.n_particles)  # deformation gradient
         self.material = ti.field(dtype=int, shape=self.n_particles)  # material id
         self.Jp = ti.field(dtype=self.real, shape=self.n_particles)  # plastic deformation
 
         # Quantities defined on grid
         self.grid_v = ti.Vector.field(self.dim, dtype=self.real,
-                                 shape=self.grid_shape)  # grid node momentum/velocity
+                                      shape=self.grid_shape)  # grid node momentum/velocity
 
         self.grid_v_new = ti.Vector.field(self.dim, dtype=self.real,
-                                 shape=self.grid_shape)  # new grid node momentum, also used for store forces temporally
+                                          shape=self.grid_shape)  # new grid node momentum, also used for store forces temporally
 
         self.grid_m = ti.field(dtype=self.real, shape=self.grid_shape)  # grid node mass
 
         if implicit:
             assert optimization_solver
             self.old_F = ti.Matrix.field(self.dim, self.dim, dtype=self.real,
-                            shape=self.n_particles)  # backup deformation gradient
+                                         shape=self.n_particles)  # backup deformation gradient
 
             # # Quantities for linear solver
             # self.mass_matrix = ti.field(dtype=self.real, shape=self.n_nodes)
@@ -69,7 +70,8 @@ class MlsMpmSolver(MPMSimulationBase):
 
             # Quantities for linear solver
             self.mass_matrix = ti.field(dtype=self.real, shape=self.grid_shape)
-            self.dv = ti.Vector.field(dim, dtype=self.real, shape=self.grid_shape)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
+            self.dv = ti.Vector.field(dim, dtype=self.real,
+                                      shape=self.grid_shape)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
             # self.residual = ti.Vector.field(dim, dtype=self.real, shape=self.grid_shape)
 
             if self.diff_test:
@@ -79,7 +81,8 @@ class MlsMpmSolver(MPMSimulationBase):
                                           self.compute_energy_gradient,
                                           self.update_state,
                                           self.multiply,
-                                          dtype=self.real)
+                                          dtype=self.real,
+                                          is_test_hessian=True)
             self.is_difftest_done = False
 
             # scratch data for calculate differential of F
@@ -142,7 +145,7 @@ class MlsMpmSolver(MPMSimulationBase):
             # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]
             w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
             self.F[p] = (ti.Matrix.identity(self.real, 2) +
-                    self.dt * self.C[p]) @ self.F[p]  # deformation gradient update
+                         self.dt * self.C[p]) @ self.F[p]  # deformation gradient update
             h = ti.exp(
                 10 *
                 (1.0 -
@@ -216,11 +219,11 @@ class MlsMpmSolver(MPMSimulationBase):
                     if j > self.n_grid - self.bound and self.grid_v[I][1] > 0:
                         self.grid_v[I][1] = 0
                 if self.dim == 3:
-                    k = I[self.dim-1]
-                    if k < 3 and self.grid_v[I][self.dim-1] < 0:
-                        self.grid_v[I][self.dim-1] = 0
-                    if k > self.n_grid - self.bound and self.grid_v[I][self.dim-1] > 0:
-                        self.grid_v[I][self.dim-1] = 0
+                    k = I[self.dim - 1]
+                    if k < 3 and self.grid_v[I][self.dim - 1] < 0:
+                        self.grid_v[I][self.dim - 1] = 0
+                    if k > self.n_grid - self.bound and self.grid_v[I][self.dim - 1] > 0:
+                        self.grid_v[I][self.dim - 1] = 0
 
     def backward_euler(self):
         self.build_mass_matrix()
@@ -264,7 +267,7 @@ class MlsMpmSolver(MPMSimulationBase):
     @ti.func
     def compute_stress_differential(self, p, grad_dv: ti.template(), dstress: ti.template(), dvp: ti.template()):
         Fn_local = self.old_F[p]
-        dP = self.first_piola_differential(p, Fn_local, grad_dv @ Fn_local)
+        dP = self.first_piola_differential(p, self.F[p], self.dt * grad_dv @ Fn_local)
         dstress += self.p_vol * dP @ Fn_local.transpose()
 
     # B = dPdF(Sigma) : A
@@ -289,16 +292,15 @@ class MlsMpmSolver(MPMSimulationBase):
     @ti.func
     def reinitialize_isotropic_helper(self, p):
         if ti.static(self.dim == 2):
-            self.psi0[p] = 0  # d_PsiHat_d_sigma0
-            self.psi1[p] = 0  # d_PsiHat_d_sigma1
-            self.psi00[p] = 0  # d^2_PsiHat_d_sigma0_d_sigma0
-            self.psi01[p] = 0  # d^2_PsiHat_d_sigma0_d_sigma1
-            self.psi11[p] = 0  # d^2_PsiHat_d_sigma1_d_sigma1
-            self.m01[p] = 0  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
-            self.p01[p] = 0  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
+            self.psi0[p] = 0.  # d_PsiHat_d_sigma0
+            self.psi1[p] = 0.  # d_PsiHat_d_sigma1
+            self.psi00[p] = 0.  # d^2_PsiHat_d_sigma0_d_sigma0
+            self.psi01[p] = 0.  # d^2_PsiHat_d_sigma0_d_sigma1
+            self.psi11[p] = 0.  # d^2_PsiHat_d_sigma1_d_sigma1
+            self.m01[p] = 0.  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
+            self.p01[p] = 0.  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
             # self.Aij[p] = ti.zero(self.Aij[p])
             # self.B01[p] = ti.zero(self.B01[p])
-
 
     @ti.func
     def clamp_small_magnitude(self, x, eps):
@@ -346,7 +348,7 @@ class MlsMpmSolver(MPMSimulationBase):
             m = self.mass_matrix[I]
             dv = self.dv[I]
             result += m * dv.dot(dv) / 2
-        # 
+
         # # gravity potential
         # for I in ti.grouped(self.dv):
         #     m = self.mass_matrix[I]
@@ -368,9 +370,8 @@ class MlsMpmSolver(MPMSimulationBase):
                 weight = ti.cast(1.0, self.real)
                 for i in ti.static(range(self.dim)):
                     weight *= w[offset[i]][i]
-
                 g_v = self.grid_v[base + offset] + dv[base + offset]
-                new_C += 4 * self.inv_dx * self.inv_dx  * weight * g_v.outer_product(dpos)
+                new_C += 4 * self.inv_dx * self.inv_dx * weight * g_v.outer_product(dpos)
 
             self.F[p] = (ti.Matrix.identity(self.real, self.dim) + self.dt * new_C) @ self.old_F[p]
             self.update_isotropic_helper(p, self.F[p])
@@ -383,7 +384,7 @@ class MlsMpmSolver(MPMSimulationBase):
                 node_id = I
                 if ti.static(not self.ignore_collision):
                     cond = (I < self.bound and self.grid_v[I] < 0) or (
-                                I > self.n_grid - self.bound and self.grid_v[I] > 0)
+                            I > self.n_grid - self.bound and self.grid_v[I] > 0)
                     self.dv[node_id] = 0 if cond else self.gravity * self.dt
                 else:
                     self.dv[node_id] = self.gravity * self.dt  # Newton initial guess for non-collided nodes
@@ -392,7 +393,7 @@ class MlsMpmSolver(MPMSimulationBase):
     def construct_new_velocity_from_newton_result(self):
         for I in ti.grouped(self.grid_m):
             if self.grid_m[I] > 0:
-                self.grid_v[I] += self.dv[I]   # self.dv[self.idx(I)]
+                self.grid_v[I] += self.dv[I]  # self.dv[self.idx(I)]
                 cond = (I < self.bound and self.grid_v[I] < 0) or (I > self.n_grid - self.bound and self.grid_v[I] > 0)
                 self.grid_v[I] = 0 if cond else self.grid_v[I]
 
@@ -436,7 +437,7 @@ class MlsMpmSolver(MPMSimulationBase):
     def newton_solve(self):
         self.optimization_solver.solve(self.dv)
         self.run_difftest()
-    
+
     @ti.func
     def compute_dv_and_grad_dv(self, dv: ti.template()):
         for p in self.x:
@@ -455,7 +456,7 @@ class MlsMpmSolver(MPMSimulationBase):
 
                 dv0 = dv[base + offset]
                 vp += weight * dv0
-                gradV += 4 * self.inv_dx * weight * dv0.outer_product(dpos)
+                gradV += 4 * self.inv_dx * self.inv_dx * weight * dv0.outer_product(dpos)
 
             self.scratch_vp[p] = vp
             self.scratch_gradV[p] = gradV
@@ -488,14 +489,14 @@ class MlsMpmSolver(MPMSimulationBase):
             base = int(Xp - 0.5)
             fx = Xp - base
             w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (
-                        fx - 0.5) ** 2]  # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]
+                    fx - 0.5) ** 2]  # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]
             stress = self.scratch_stress[p]
             for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
                 dpos = (offset - fx) * self.dx
                 weight = ti.cast(1.0, self.real)
                 for i in ti.static(range(self.dim)):
                     weight *= w[offset[i]][i]
-                b[base + offset] += self.dt * self.dt * (weight * stress @ dpos)
+                b[base + offset] += 4 * self.inv_dx * self.inv_dx * self.dt * (weight * stress @ dpos)
                 # fi -= \sum_p (Ap (xi-xp)  - fp )w_ip Dp_inv
                 # fp: mesh force, not applied here; Ap: dp; Dp_inv: inv_dx
 
@@ -518,7 +519,8 @@ class MlsMpmSolver(MPMSimulationBase):
         # Compute the RHS (i.e. usually energy gradient) of the linear system
         # for I in ti.grouped(self.dv):
         #     residual[I] = self.dt * self.mass_matrix[I] * self.gravity
-        # 
+
+        # inertia part
         for I in ti.grouped(self.dv):
             residual[I] -= self.mass_matrix[I] * self.dv[I]
 
@@ -549,12 +551,8 @@ class MlsMpmSolver(MPMSimulationBase):
                     weight *= w[offset[i]][i]
                 force = weight * stress @ dpos
                 residual[base + offset] += self.dt * force
+        # Handle boundary values
         self.project(residual)
-        
-        # # Copy to the residual holder
-        # for I in ti.grouped(residual):
-        #     residual[I] = self.residual[I]
-
 
     @ti.kernel
     def grid_to_particles(self):
@@ -601,14 +599,15 @@ if __name__ == '__main__':
     visualization_limit = dt
     optimization_solver = None
     if optimization_solver_type == 'gradient_descent':
-        optimization_solver = (optimization_solver_type, GradientDescentSolver(max_iterations=15, adaptive_step_size=False))
+        optimization_solver = (
+        optimization_solver_type, GradientDescentSolver(max_iterations=15, adaptive_step_size=False))
     elif optimization_solver_type == 'newton':
-        optimization_solver = (optimization_solver_type,  NewtonSolver(max_iterations=10))
-        
-    solver = MlsMpmSolver(dt=dt, 
-                          gravity=0.0, 
-                          implicit=args.implicit, 
-                          optimization_solver=optimization_solver, 
+        optimization_solver = (optimization_solver_type, NewtonSolver(max_iterations=5))
+
+    solver = MlsMpmSolver(dt=dt,
+                          gravity=0.0,
+                          implicit=args.implicit,
+                          optimization_solver=optimization_solver,
                           diff_test=args.difftest)
     solver.initialize()
     while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):

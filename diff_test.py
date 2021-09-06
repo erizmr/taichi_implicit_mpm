@@ -14,7 +14,7 @@ class DiffTest:
                  multipy,
                  diff_test_perturbation_scale=1000,
                  dtype=ti.f32,
-                 is_test_hessian=False):
+                 is_test_hessian=True):
         self.dim = dim
         self.dtype = dtype
         self.is_test_hessian = is_test_hessian
@@ -51,6 +51,7 @@ class DiffTest:
         self.force_difference = ti.Vector.field(dim, dtype=self.dtype, shape=shape)
         self.force_differential = ti.Vector.field(dim, dtype=self.dtype, shape=shape)
 
+        self.energy_list = []
         self.energy_difference_list = []
         self.energy_differential_list = []
         self.err_list = []
@@ -116,15 +117,15 @@ class DiffTest:
     def compute_difference_norm(self, x: ti.template(), y: ti.template()) -> ti.f32:
         result = 0.0
         for I in ti.grouped(x):
-            result += (x[I] - y[I]).norm()
+            result += (x[I] - y[I]).dot(x[I] - y[I])
         return ti.sqrt(result)
 
     @ti.kernel
     def compute_norm(self, x: ti.template()) -> ti.f32:
         result = 0.0
         for I in ti.grouped(x):
-            result += x[I].norm()
-        return result
+            result += x[I].dot(x[I])
+        return ti.sqrt(result)
 
     def run(self, dv, F, nums=10):
         self.initialize(dv, F)
@@ -132,6 +133,8 @@ class DiffTest:
         for i in range(nums):
             h = self.diff_test_perturbation_scale * 2 ** (-i)
             self.update_state(dv, h)
+
+            # Compute Jacobian
             e1 = self.total_energy()
             self.compute_energy_gradient(self.f1)
             difference = (self.e0 - e1) / h
@@ -139,11 +142,13 @@ class DiffTest:
             err = (difference - differential)
             log_err = np.log(abs(err))
 
+            self.energy_list.append(e1)
             self.err_list.append(err)
             self.log_err_list.append(log_err)
             self.energy_difference_list.append(difference)
             self.energy_differential_list.append(differential)
 
+            # Compute Hessian
             self.multiply(self.step, self.df1)
             self.compute_force_difference(self.f0, self.f1, h)
             self.compute_force_differential(self.df0, self.df1)
@@ -162,10 +167,13 @@ class DiffTest:
             self.copy_to_field(dv, self.dv0)
             self.copy_to_field(F, self.F0)
 
-            print(f"[Energy]: energy[0]={self.e0}, energy[{i}]={e1}, difference: {difference}, "
-                  f"differential: {differential}, err: {err}, log_err: {log_err}")
-            print("\n")
-            print(f"[Force]: difference norm: {force_difference}, differential norm: {force_differential},"
-                  f"err: {force_err_norm}, log_err: {force_log_err_norm}")
+        for i in range(nums):
 
+            print(f"[Energy]: energy[0]={self.e0}, energy[{i}]={self.energy_list[i]}, difference: {self.energy_difference_list[i]}, "
+                  f"differential: {self.energy_differential_list[i]}, err: {self.err_list[i]}, log_err: {self.log_err_list[i]}")
+        print("\n")
+            
+        for i in range(nums):
+            print(f"[Force]: difference norm: {self.force_difference_list[i]}, differential norm: {self.force_differential_list[i]}, "
+                  f"err: {self.force_err_norm_list[i]}, log_err: {self.force_log_err_list[i]}")
         print("\n")
