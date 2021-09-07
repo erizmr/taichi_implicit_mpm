@@ -32,7 +32,7 @@ class MlsMpmSolver(MPMSimulationBase):
         self.group_size = self.n_particles // 2
         self.dx, self.inv_dx = 1 / self.n_grid, float(self.n_grid)
         self.dt = dt / self.quality
-        self.cfl_limit = 0.2
+        self.cfl_limit = 0.4
 
         self.p_vol, self.p_rho = (self.dx * 0.5) ** 2, 1
         self.p_mass = self.p_vol * self.p_rho
@@ -98,16 +98,36 @@ class MlsMpmSolver(MPMSimulationBase):
             self.scratch_stress = ti.Matrix.field(self.dim, self.dim, dtype=self.real, shape=self.n_particles)
 
             # These should be updated everytime a new SVD is performed to F
-            if ti.static(dim == 2):
-                self.psi0 = ti.field(dtype=self.real, shape=self.n_particles)  # d_PsiHat_d_sigma0
-                self.psi1 = ti.field(dtype=self.real, shape=self.n_particles)  # d_PsiHat_d_sigma1
-                self.psi00 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma0_d_sigma0
-                self.psi01 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma0_d_sigma1
-                self.psi11 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma1_d_sigma1
-                self.m01 = ti.field(dtype=self.real,
-                                    shape=self.n_particles)  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
-                self.p01 = ti.field(dtype=self.real,
-                                    shape=self.n_particles)  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
+            # if ti.static(dim == 2):
+            self.psi0 = ti.field(dtype=self.real, shape=self.n_particles)  # d_PsiHat_d_sigma0
+            self.psi1 = ti.field(dtype=self.real, shape=self.n_particles)  # d_PsiHat_d_sigma1
+            self.psi00 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma0_d_sigma0
+            self.psi01 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma0_d_sigma1
+            self.psi11 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma1_d_sigma1
+            self.m01 = ti.field(dtype=self.real,
+                                shape=self.n_particles)  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
+            self.p01 = ti.field(dtype=self.real,
+                                shape=self.n_particles)  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
+            self.Aij = ti.Matrix.field(dim, dim, dtype=self.real, shape=self.n_particles)
+            self.B01 = ti.Matrix.field(2, 2, dtype=self.real, shape=self.n_particles)
+            if ti.static(dim == 3):
+                self.psi2 = ti.field(dtype=self.real, shape=self.n_particles)  # d_PsiHat_d_sigma2
+                self.psi22 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma2_d_sigma2
+                self.psi02 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma0_d_sigma2
+                self.psi12 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma1_d_sigma2
+
+                self.m02 = ti.field(dtype=self.real,
+                                    shape=self.n_particles)  # (psi0-psi2)/(sigma0-sigma2), usually can be computed robustly
+                self.p02 = ti.field(dtype=self.real,
+                                    shape=self.n_particles)  # (psi0+psi2)/(sigma0+sigma2), need to clamp bottom with 1e-6
+                self.m12 = ti.field(dtype=self.real,
+                                    shape=self.n_particles)  # (psi1-psi2)/(sigma1-sigma2), usually can be computed robustly
+                self.p12 = ti.field(dtype=self.real,
+                                    shape=self.n_particles)  # (psi1+psi2)/(sigma1+sigma2), need to clamp bottom with 1e-6
+                # self.Aij = ti.Matrix.field(dim, dim, dtype=self.real, shape=self.n_particles)
+                # self.B01 = ti.Matrix.field(2, 2, dtype=self.real, shape=self.n_particles)
+                self.B12 = ti.Matrix.field(2, 2, dtype=self.real, shape=self.n_particles)
+                self.B20 = ti.Matrix.field(2, 2, dtype=self.real, shape=self.n_particles)
 
     def initialize(self):
         self.simulation_initialize()
@@ -130,29 +150,31 @@ class MlsMpmSolver(MPMSimulationBase):
         for i in range(self.n_particles):
             self.x[i] = [
                 ti.random() * 0.2 + 0.3 + 0.10 * (i // self.group_size),
-                ti.random() * 0.2 + 0.05 + 0.32 * (i // self.group_size)
-            ]
+                ti.random() * 0.2 + 0.05 + 0.32 * (i // self.group_size),
+                ti.random() * 0.2 + 0.05
+                ]
             self.material[i] = i // self.group_size  # 0: fluid 1: jelly 2: snow
             self.v[i] = ti.Matrix([0 for _ in range(self.dim)])
             if self.material[i] == 0:
-                self.v[i] = ti.Matrix([0, -2.0])
+                self.v[i] = ti.Matrix([0, 4.0, 0.0])
                 self.colors[i] = (0, 0.5, 0.5)
             if self.material[i] == 1:
-                self.v[i] = ti.Matrix([0, -2.0])
+                self.v[i] = ti.Matrix([0, -2.0, 0.0])
                 self.colors[i] = (0.93, 0.33, 0.23)
             if self.material[i] == 2:
-                self.v[i] = ti.Matrix([0, -3.0])
-            self.F[i] = ti.Matrix([[1, 0], [0, 1]])
+                self.v[i] = ti.Matrix([0, -3.0, 0.0])
+            # self.F[i] = ti.Matrix([[1, 0], [0, 1]])
+            self.F[i] = ti.Matrix([[1, 0, 0 ], [0, 1, 0], [0, 0, 1]])
             # self.old_F[i] = ti.Matrix([[1, 0], [0, 1]])
             self.Jp[i] = 1
             self.max_velocity[None] = 3.0
 
     @ti.kernel
     def reinitialize(self):
-        for i, j in self.grid_m:
-            self.grid_v[i, j] = [0, 0]
-            self.grid_v_new[i, j] = [0, 0]
-            self.grid_m[i, j] = 0
+        for I in ti.grouped(self.grid_m):
+            self.grid_v[I] = [0 for _ in range(self.dim)]
+            self.grid_v_new[I] = [0 for _ in range(self.dim)]
+            self.grid_m[I] = 0
 
     @ti.kernel
     def particles_to_grid(self):
@@ -161,7 +183,7 @@ class MlsMpmSolver(MPMSimulationBase):
             fx = self.x[p] * self.inv_dx - base.cast(self.real)
             # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]
             w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
-            self.F[p] = (ti.Matrix.identity(self.real, 2) +
+            self.F[p] = (ti.Matrix.identity(self.real, self.dim) +
                          self.dt * self.C[p]) @ self.F[p]  # deformation gradient update
             h = ti.exp(
                 10 *
@@ -180,7 +202,7 @@ class MlsMpmSolver(MPMSimulationBase):
 
             U, sig, V = ti.svd(self.F[p], self.real)
             J = ti.cast(1.0, self.real)
-            for d in ti.static(range(2)):
+            for d in ti.static(range(self.dim)):
                 new_sig = sig[d, d]
                 if self.material[p] == 2:  # Snow
                     new_sig = min(max(sig[d, d], 1 - 2.5e-2),
@@ -198,7 +220,7 @@ class MlsMpmSolver(MPMSimulationBase):
             #     )  # Reconstruct elastic deformation gradient after plasticity
 
             stress = 2 * mu * (self.F[p] - U @ V.transpose()) @ self.F[p].transpose(
-            ) + ti.Matrix.identity(self.real, 2) * la * J * (J - 1)
+            ) + ti.Matrix.identity(self.real, self.dim) * la * J * (J - 1)
             # stress = (-self.dt * self.p_vol * 4 * self.inv_dx * self.inv_dx) * stress
             # affine = stress + self.p_mass * self.C[p]
             affine = self.p_mass * self.C[p]
@@ -291,20 +313,24 @@ class MlsMpmSolver(MPMSimulationBase):
     @ti.func
     def dPdF_of_sigma_contract(self, p, A, B: ti.template()):
         if ti.static(self.dim == 2):
-            B[0, 0] = self.psi00[p] * A[0, 0] + self.psi01[p] * A[1, 1]
-            B[1, 1] = self.psi01[p] * A[0, 0] + self.psi11[p] * A[1, 1]
-            B[0, 1] = ((self.m01[p] + self.p01[p]) * A[0, 1] + (self.m01[p] - self.p01[p]) * A[1, 0]) * 0.5
-            B[1, 0] = ((self.m01[p] - self.p01[p]) * A[0, 1] + (self.m01[p] + self.p01[p]) * A[1, 0]) * 0.5
-        # if ti.static(self.dim == 3):
-        #     B[0, 0] = self.Aij[p][0, 0] * A[0, 0] + self.Aij[p][0, 1] * A[1, 1] + self.Aij[p][0, 2] * A[2, 2]
-        #     B[1, 1] = self.Aij[p][1, 0] * A[0, 0] + self.Aij[p][1, 1] * A[1, 1] + self.Aij[p][1, 2] * A[2, 2]
-        #     B[2, 2] = self.Aij[p][2, 0] * A[0, 0] + self.Aij[p][2, 1] * A[1, 1] + self.Aij[p][2, 2] * A[2, 2]
-        #     B[0, 1] = self.B01[p][0, 0] * A[0, 1] + self.B01[p][0, 1] * A[1, 0]
-        #     B[1, 0] = self.B01[p][1, 0] * A[0, 1] + self.B01[p][1, 1] * A[1, 0]
-        #     B[0, 2] = self.B20[p][0, 0] * A[0, 2] + self.B20[p][0, 1] * A[2, 0]
-        #     B[2, 0] = self.B20[p][1, 0] * A[0, 2] + self.B20[p][1, 1] * A[2, 0]
-        #     B[1, 2] = self.B12[p][0, 0] * A[1, 2] + self.B12[p][0, 1] * A[2, 1]
-        #     B[2, 1] = self.B12[p][1, 0] * A[1, 2] + self.B12[p][1, 1] * A[2, 1]
+            # B[0, 0] = self.psi00[p] * A[0, 0] + self.psi01[p] * A[1, 1]
+            # B[1, 1] = self.psi01[p] * A[0, 0] + self.psi11[p] * A[1, 1]
+            # B[0, 1] = ((self.m01[p] + self.p01[p]) * A[0, 1] + (self.m01[p] - self.p01[p]) * A[1, 0]) * 0.5
+            # B[1, 0] = ((self.m01[p] - self.p01[p]) * A[0, 1] + (self.m01[p] + self.p01[p]) * A[1, 0]) * 0.5
+            B[0, 0] = self.Aij[p][0, 0] * A[0, 0] + self.Aij[p][0, 1] * A[1, 1]
+            B[1, 1] = self.Aij[p][1, 0] * A[0, 0] + self.Aij[p][1, 1] * A[1, 1]
+            B[0, 1] = self.B01[p][0, 0] * A[0, 1] + self.B01[p][0, 1] * A[1, 0]
+            B[1, 0] = self.B01[p][1, 0] * A[0, 1] + self.B01[p][1, 1] * A[1, 0]
+        elif ti.static(self.dim == 3):
+            B[0, 0] = self.Aij[p][0, 0] * A[0, 0] + self.Aij[p][0, 1] * A[1, 1] + self.Aij[p][0, 2] * A[2, 2]
+            B[1, 1] = self.Aij[p][1, 0] * A[0, 0] + self.Aij[p][1, 1] * A[1, 1] + self.Aij[p][1, 2] * A[2, 2]
+            B[2, 2] = self.Aij[p][2, 0] * A[0, 0] + self.Aij[p][2, 1] * A[1, 1] + self.Aij[p][2, 2] * A[2, 2]
+            B[0, 1] = self.B01[p][0, 0] * A[0, 1] + self.B01[p][0, 1] * A[1, 0]
+            B[1, 0] = self.B01[p][1, 0] * A[0, 1] + self.B01[p][1, 1] * A[1, 0]
+            B[0, 2] = self.B20[p][0, 0] * A[0, 2] + self.B20[p][0, 1] * A[2, 0]
+            B[2, 0] = self.B20[p][1, 0] * A[0, 2] + self.B20[p][1, 1] * A[2, 0]
+            B[1, 2] = self.B12[p][0, 0] * A[1, 2] + self.B12[p][0, 1] * A[2, 1]
+            B[2, 1] = self.B12[p][1, 0] * A[1, 2] + self.B12[p][1, 1] * A[2, 1]
 
     @ti.func
     def reinitialize_isotropic_helper(self, p):
@@ -352,6 +378,54 @@ class MlsMpmSolver(MPMSimulationBase):
 
             # (psi0+psi1)/(sigma0+sigma1)
             self.p01[p] = (self.psi0[p] + self.psi1[p]) / self.clamp_small_magnitude(sigma[0, 0] + sigma[1, 1], 1e-6)
+
+            self.Aij[p] = ti.Matrix(
+                [[self.psi00[p], self.psi01[p]],
+                 [self.psi01[p], self.psi11[p]]])
+            self.B01[p] = ti.Matrix(
+                [[(self.m01[p] + self.p01[p]) * 0.5, (self.m01[p] - self.p01[p]) * 0.5],
+                 [(self.m01[p] - self.p01[p]) * 0.5, (self.m01[p] + self.p01[p]) * 0.5]])
+
+        elif ti.static(self.dim == 3):
+            U, sigma, V = ti.svd(F)
+            J = sigma[0, 0] * sigma[1, 1] * sigma[2, 2]
+            _2mu = self.mu_0 * 2
+            _lambda = self.lambda_0 * (J - 1)
+            Sprod = ti.Vector([sigma[1, 1] * sigma[2, 2], sigma[0, 0] * sigma[2, 2], sigma[0, 0] * sigma[1, 1]])
+            self.psi0[p] = _2mu * (sigma[0, 0] - 1) + _lambda * Sprod[0]
+            self.psi1[p] = _2mu * (sigma[1, 1] - 1) + _lambda * Sprod[1]
+            self.psi2[p] = _2mu * (sigma[2, 2] - 1) + _lambda * Sprod[2]
+            self.psi00[p] = _2mu + self.lambda_0 * Sprod[0] * Sprod[0]
+            self.psi11[p] = _2mu + self.lambda_0 * Sprod[1] * Sprod[1]
+            self.psi22[p] = _2mu + self.lambda_0 * Sprod[2] * Sprod[2]
+            self.psi01[p] = _lambda * sigma[2, 2] + self.lambda_0 * Sprod[0] * Sprod[1]
+            self.psi02[p] = _lambda * sigma[1, 1] + self.lambda_0 * Sprod[0] * Sprod[2]
+            self.psi12[p] = _lambda * sigma[0, 0] + self.lambda_0 * Sprod[1] * Sprod[2]
+
+            # (psiA-psiB)/(sigmaA-sigmaB)
+            self.m01[p] = _2mu - _lambda * sigma[2, 2]  # i[p] = 0
+            self.m02[p] = _2mu - _lambda * sigma[1, 1]  # i[p] = 2
+            self.m12[p] = _2mu - _lambda * sigma[0, 0]  # i[p] = 1
+
+            # (psiA+psiB)/(sigmaA+sigmaB)
+            self.p01[p] = (self.psi0[p] + self.psi1[p]) / self.clamp_small_magnitude(sigma[0, 0] + sigma[1, 1], 1e-6)
+            self.p02[p] = (self.psi0[p] + self.psi2[p]) / self.clamp_small_magnitude(sigma[0, 0] + sigma[2, 2], 1e-6)
+            self.p12[p] = (self.psi1[p] + self.psi2[p]) / self.clamp_small_magnitude(sigma[1, 1] + sigma[2, 2], 1e-6)
+
+            self.Aij[p] = ti.Matrix([
+                [self.psi00[p], self.psi01[p], self.psi02[p]],
+                [self.psi01[p], self.psi11[p], self.psi12[p]],
+                [self.psi02[p], self.psi12[p], self.psi22[p]]])
+            self.B01[p] = ti.Matrix([
+                [(self.m01[p] + self.p01[p]) * 0.5, (self.m01[p] - self.p01[p]) * 0.5],
+                [(self.m01[p] - self.p01[p]) * 0.5, (self.m01[p] + self.p01[p]) * 0.5]])
+            self.B12[p] = ti.Matrix([
+                [(self.m12[p] + self.p12[p]) * 0.5, (self.m12[p] - self.p12[p]) * 0.5],
+                [(self.m12[p] - self.p12[p]) * 0.5, (self.m12[p] + self.p12[p]) * 0.5]])
+            self.B20[p] = ti.Matrix([
+                [(self.m02[p] + self.p02[p]) * 0.5, (self.m02[p] - self.p02[p]) * 0.5],
+                [(self.m02[p] - self.p02[p]) * 0.5, (self.m02[p] + self.p02[p]) * 0.5]])
+
 
     @ti.kernel
     def total_energy(self) -> ti.f64:
@@ -600,10 +674,14 @@ class MlsMpmSolver(MPMSimulationBase):
                 if new_v[idx_v] > self.max_velocity[None]:
                     self.max_velocity[None] = new_v[idx_v]
 
+
 if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='MPM')
+    parser.add_argument('--dim', type=int,
+                        default=2,
+                        help='dimension')
     parser.add_argument('--implicit', action='store_true',
                         help='implicit or not')
     parser.add_argument('--difftest', action='store_true',
@@ -612,13 +690,16 @@ if __name__ == '__main__':
                         help='do gradient descent or not')
     args = parser.parse_args()
 
+    dim = args.dim
+    assert dim == 2 or dim == 3
+
     # optimization_solver_type = 'gradient_descent'
     optimization_solver_type = 'newton'
     if args.gradient_descent:
         optimization_solver_type = 'gradient_descent'
     dt = 1e-4
     if args.implicit:
-        dt = 4e-3
+        dt = 1e-4
 
     visualization_limit = dt
     optimization_solver = None
@@ -629,7 +710,7 @@ if __name__ == '__main__':
         optimization_solver = (optimization_solver_type, NewtonSolver(max_iterations=10))
 
     solver = MlsMpmSolver(dt=dt,
-                          dim=2,
+                          dim=dim,
                           gravity=9.8,
                           implicit=args.implicit,
                           optimization_solver=optimization_solver,
@@ -647,14 +728,45 @@ if __name__ == '__main__':
     #     gui.show(
     #     )  # Change to gui.show(f'{frame:06d}.png') to write images to disk
 
-    window = ti.ui.Window('Taichi MLS-MPM', (512, 512))
-    canvas = window.get_canvas()
+    if dim == 2:
+        window = ti.ui.Window('Taichi MLS-MPM', (512, 512))
+        canvas = window.get_canvas()
 
-    while window.running:
-        for s in range(int(visualization_limit // solver.dt)):
-            solver.advance_one_time_step()
-        canvas.set_background_color((0.067, 0.184, 0.255))
-        canvas.circles(solver.x,
-                       radius=0.002,
-                       per_vertex_color=solver.colors)
-        window.show()
+        while window.running:
+            for s in range(int(visualization_limit // solver.dt)):
+                solver.advance_one_time_step()
+            canvas.set_background_color((0.067, 0.184, 0.255))
+            canvas.circles(solver.x,
+                           radius=0.002,
+                           per_vertex_color=solver.colors)
+            window.show()
+    elif dim == 3:
+        res = (512, 512)
+        window = ti.ui.Window("MLS-MPM 3D", res, vsync=True)
+
+        # Set up
+        frame_id = 0
+        canvas = window.get_canvas()
+        scene = ti.ui.Scene()
+        camera = ti.ui.make_camera()
+        camera.position(0.5, 1.0, 1.95)
+        camera.lookat(0.5, 0.3, 0.5)
+        camera.fov(55)
+
+        while window.running:
+            for s in range(int(visualization_limit // solver.dt)):
+                solver.advance_one_time_step()
+            # Render
+            camera.track_user_inputs(window, movement_speed=0.03, hold_key=ti.ui.RMB)
+            scene.set_camera(camera)
+
+            scene.ambient_light((0, 0, 0))
+
+            scene.particles(solver.x, per_vertex_color=solver.colors, radius=0.002)
+            scene.point_light(pos=(0.5, 1.5, 0.5), color=(0.5, 0.5, 0.5))
+            scene.point_light(pos=(0.5, 1.5, 1.5), color=(0.5, 0.5, 0.5))
+
+            canvas.scene(scene)
+
+            window.show()
+
