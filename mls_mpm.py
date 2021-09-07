@@ -1,4 +1,5 @@
 import taichi as ti
+import numpy as np
 from mpm_base import MPMSimulationBase
 from gradient_descent import GradientDescentSolver
 from conjugate_gradient import ConjugateGradientSolver
@@ -17,9 +18,9 @@ class MlsMpmSolver(MPMSimulationBase):
                  diff_test=False):
         super(MlsMpmSolver, self).__init__(implicit=implicit)
         self.dim = dim
-        self.real = ti.f64
+        self.real = ti.f32
         self.quality = 1  # Use a larger value for higher-res simulations
-        self.ignore_collision = True
+        self.ignore_collision = False
         self.debug_mode = True
         self.optimization_solver_name, self.optimization_solver = optimization_solver
         self.diff_test = diff_test
@@ -31,14 +32,18 @@ class MlsMpmSolver(MPMSimulationBase):
         self.group_size = self.n_particles // 2
         self.dx, self.inv_dx = 1 / self.n_grid, float(self.n_grid)
         self.dt = dt / self.quality
+        self.cfl_limit = 0.2
+
         self.p_vol, self.p_rho = (self.dx * 0.5) ** 2, 1
         self.p_mass = self.p_vol * self.p_rho
-        self.E, self.nu = 0.01e4, 0.2  # Young's modulus and Poisson's ratio
+        self.E, self.nu = 0.1e4, 0.2  # Young's modulus and Poisson's ratio
         self.mu_0, self.lambda_0 = self.E / (2 * (1 + self.nu)), self.E * self.nu / (
                 (1 + self.nu) * (1 - 2 * self.nu))  # Lame parameters
 
         self.gravity = ti.Vector([(-gravity if i == gravity_dim else 0) for i in range(dim)])
 
+        # Max velocity for CFL checking
+        self.max_velocity = ti.field(dtype=self.real, shape=())
         # Quantities defined on particles
         self.x = ti.Vector.field(self.dim, dtype=self.real, shape=self.n_particles)  # position
         self.v = ti.Vector.field(self.dim, dtype=self.real, shape=self.n_particles)  # velocity
@@ -47,6 +52,7 @@ class MlsMpmSolver(MPMSimulationBase):
         self.F = ti.Matrix.field(self.dim, self.dim, dtype=self.real,
                                  shape=self.n_particles)  # deformation gradient
         self.material = ti.field(dtype=int, shape=self.n_particles)  # material id
+        self.colors = ti.Vector.field(3, dtype=float, shape=self.n_particles)
         self.Jp = ti.field(dtype=self.real, shape=self.n_particles)  # plastic deformation
 
         # Quantities defined on grid
@@ -107,8 +113,16 @@ class MlsMpmSolver(MPMSimulationBase):
         self.simulation_initialize()
         functions_dict = {"multiply": self.multiply,
                           "compute_residual": self.compute_energy_gradient,
-                          "update_simulation_state": self.update_state}
+                          "update_simulation_state": self.update_state,
+                          "project": self.project_kernel}
         self.optimization_solver.initialize(self.dim, self.grid_shape, functions_dict, dtype=self.real)
+    
+    def check_cfl_condition(self):
+        # Check the CFL condition
+        cfl_dt = self.cfl_limit / self.n_grid / self.max_velocity[None]
+        if self.dt > cfl_dt:
+            self.dt = cfl_dt
+            print(f"CFL required dt: {cfl_dt}, current dt: {self.dt}, max velocity: {self.max_velocity[None]} ")
 
     # TODO: currently 2D only
     @ti.kernel
@@ -119,16 +133,19 @@ class MlsMpmSolver(MPMSimulationBase):
                 ti.random() * 0.2 + 0.05 + 0.32 * (i // self.group_size)
             ]
             self.material[i] = i // self.group_size  # 0: fluid 1: jelly 2: snow
-            self.v[i] = ti.Matrix([0, 0])
+            self.v[i] = ti.Matrix([0 for _ in range(self.dim)])
             if self.material[i] == 0:
-                self.v[i] = ti.Matrix([0, 2.0])
+                self.v[i] = ti.Matrix([0, -2.0])
+                self.colors[i] = (0, 0.5, 0.5)
             if self.material[i] == 1:
                 self.v[i] = ti.Matrix([0, -2.0])
+                self.colors[i] = (0.93, 0.33, 0.23)
             if self.material[i] == 2:
                 self.v[i] = ti.Matrix([0, -3.0])
             self.F[i] = ti.Matrix([[1, 0], [0, 1]])
             # self.old_F[i] = ti.Matrix([[1, 0], [0, 1]])
             self.Jp[i] = 1
+            self.max_velocity[None] = 3.0
 
     @ti.kernel
     def reinitialize(self):
@@ -349,11 +366,11 @@ class MlsMpmSolver(MPMSimulationBase):
             dv = self.dv[I]
             result += m * dv.dot(dv) / 2
 
-        # # gravity potential
-        # for I in ti.grouped(self.dv):
-        #     m = self.mass_matrix[I]
-        #     for i in ti.static(range(self.dim)):
-        #         result -= self.dt * m * self.gravity[i]
+        # gravity potential
+        for I in ti.grouped(self.dv):
+            m = self.mass_matrix[I]
+            for i in ti.static(range(self.dim)):
+                result -= self.dt * m * self.gravity[i]
         return result
 
     @ti.kernel
@@ -435,7 +452,7 @@ class MlsMpmSolver(MPMSimulationBase):
         self.run_difftest()
 
     def newton_solve(self):
-        self.optimization_solver.solve(self.dv)
+        self.optimization_solver.solve(self.dv, preconditioner=self.mass_matrix)
         self.run_difftest()
 
     @ti.func
@@ -500,25 +517,32 @@ class MlsMpmSolver(MPMSimulationBase):
                 # fi -= \sum_p (Ap (xi-xp)  - fp )w_ip Dp_inv
                 # fp: mesh force, not applied here; Ap: dp; Dp_inv: inv_dx
 
+        # Handle boundary values
+        self.project(b)
+
     @ti.func
     def project(self, x: ti.template()):
-        for p in ti.grouped(x):
+        for I in ti.grouped(x):
             # I = self.node(p)
-            I = p
+            # I = p
             cond = any(I < self.bound and self.grid_v[I] < 0) or any(
                 I > self.n_grid - self.bound and self.grid_v[I] > 0)
             if cond:
-                x[p] = ti.zero(x[p])
+                x[I] = ti.zero(x[I])
+
+    @ti.kernel
+    def project_kernel(self, x: ti.template()):
+        self.project(x)
 
     @ti.kernel
     def compute_energy_gradient(self, residual: ti.template()):
 
         for I in ti.grouped(self.dv):
-            residual[I] = [0.0, 0.0]
+            residual[I] = [0.0 for i in range(self.dim)]
 
         # Compute the RHS (i.e. usually energy gradient) of the linear system
-        # for I in ti.grouped(self.dv):
-        #     residual[I] = self.dt * self.mass_matrix[I] * self.gravity
+        for I in ti.grouped(self.dv):
+            residual[I] = self.dt * self.mass_matrix[I] * self.gravity
 
         # inertia part
         for I in ti.grouped(self.dv):
@@ -572,7 +596,9 @@ class MlsMpmSolver(MPMSimulationBase):
                 new_C += 4 * self.inv_dx * weight * g_v.outer_product(dpos)
             self.v[p], self.C[p] = new_v, new_C
             self.x[p] += self.dt * self.v[p]  # advection
-
+            for idx_v in ti.static(range(self.dim)):
+                if new_v[idx_v] > self.max_velocity[None]:
+                    self.max_velocity[None] = new_v[idx_v]
 
 if __name__ == '__main__':
     import argparse
@@ -586,15 +612,13 @@ if __name__ == '__main__':
                         help='do gradient descent or not')
     args = parser.parse_args()
 
-    gui = ti.GUI("Taichi MLS-MPM", res=512, background_color=0x112F41)
-
     # optimization_solver_type = 'gradient_descent'
     optimization_solver_type = 'newton'
     if args.gradient_descent:
         optimization_solver_type = 'gradient_descent'
     dt = 1e-4
     if args.implicit:
-        dt = 1e-3
+        dt = 4e-3
 
     visualization_limit = dt
     optimization_solver = None
@@ -602,20 +626,35 @@ if __name__ == '__main__':
         optimization_solver = (
         optimization_solver_type, GradientDescentSolver(max_iterations=15, adaptive_step_size=False))
     elif optimization_solver_type == 'newton':
-        optimization_solver = (optimization_solver_type, NewtonSolver(max_iterations=5))
+        optimization_solver = (optimization_solver_type, NewtonSolver(max_iterations=10))
 
     solver = MlsMpmSolver(dt=dt,
-                          gravity=0.0,
+                          dim=2,
+                          gravity=9.8,
                           implicit=args.implicit,
                           optimization_solver=optimization_solver,
                           diff_test=args.difftest)
     solver.initialize()
-    while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
+
+    # gui = ti.GUI("Taichi MLS-MPM", res=512, background_color=0x112F41)
+    # while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
+    #     for s in range(int(visualization_limit // solver.dt)):
+    #         solver.advance_one_time_step()
+    #     gui.circles(solver.x.to_numpy(),
+    #                 radius=1.5,
+    #                 palette=[0x068587, 0xED553B, 0xEEEEF0],
+    #                 palette_indices=solver.material)
+    #     gui.show(
+    #     )  # Change to gui.show(f'{frame:06d}.png') to write images to disk
+
+    window = ti.ui.Window('Taichi MLS-MPM', (512, 512))
+    canvas = window.get_canvas()
+
+    while window.running:
         for s in range(int(visualization_limit // solver.dt)):
             solver.advance_one_time_step()
-        gui.circles(solver.x.to_numpy(),
-                    radius=1.5,
-                    palette=[0x068587, 0xED553B, 0xEEEEF0],
-                    palette_indices=solver.material)
-        gui.show(
-        )  # Change to gui.show(f'{frame:06d}.png') to write images to disk
+        canvas.set_background_color((0.067, 0.184, 0.255))
+        canvas.circles(solver.x,
+                       radius=0.002,
+                       per_vertex_color=solver.colors)
+        window.show()

@@ -16,8 +16,8 @@ class NewtonSolver:
         self.multiply = None
         self.compute_residual = None
         self.update_simulation_state = None
-        
-        
+        self.project = None
+
     def initialize(self, dim, shape, functions_dict, dtype=ti.f32):
         self.dtype = dtype
         self.dim = dim
@@ -28,12 +28,14 @@ class NewtonSolver:
         self.multiply = functions_dict["multiply"]
         self.compute_residual = functions_dict["compute_residual"]
         self.update_simulation_state = functions_dict["update_simulation_state"]
+        self.project = functions_dict["project"]
 
         # Define a CG solver
-        self.linear_solver = ConjugateGradientSolver()
+        self.linear_solver = ConjugateGradientSolver(max_iterations=51, relative_tolerance=1e-3)
         self.linear_solver.initialize(dim=dim,
                                       shape=shape,
-                                      functions_dict={"multiply": self.multiply})
+                                      functions_dict={"multiply": self.multiply,
+                                                      "project": self.project})
 
     @ti.kernel
     def compute_residual_norm(self, x: ti.template()) -> ti.f32:
@@ -42,8 +44,8 @@ class NewtonSolver:
             result += x[I].dot(x[I])
         return ti.sqrt(result)
 
-    def linear_solve(self, x, b):
-        self.linear_solver.solve(x, b)
+    def linear_solve(self, x, b, precondtioner):
+        self.linear_solver.solve(x, b, precondtioner)
 
     @ti.kernel
     def update_step(self, dst: ti.template(), src: ti.template(), scale: ti.f32):
@@ -56,7 +58,7 @@ class NewtonSolver:
             for d in ti.static(range(self.dim)):
                 self.step_direction[I][d] = 0.0
 
-    def solve(self, x):
+    def solve(self, x, preconditioner):
         assert self.multiply is not None
         assert self.compute_residual is not None
         assert self.update_simulation_state is not None
@@ -73,7 +75,7 @@ class NewtonSolver:
             if n % 1 == 0:
                 print(f'\033[1;36m [Newton] Iter = {n}, Residual Norm = {residual_norm} \033[0m')
 
-            self.linear_solve(self.step_direction, self.residual)
+            self.linear_solve(self.step_direction, self.residual, preconditioner)
             self.update_step(x, self.step_direction, 1.0)
             self.update_simulation_state(x)
-            self.clear_step_direction()
+            # self.clear_step_direction()

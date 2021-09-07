@@ -3,17 +3,19 @@ import taichi as ti
 
 @ti.data_oriented
 class ConjugateGradientSolver:
-    def __init__(self, max_iterations=50, relative_tolerance=1e-3):
+    def __init__(self, max_iterations=100, relative_tolerance=1e-3):
         self.max_iterations = max_iterations
         self.relative_tolerance = relative_tolerance
         self.r, self.p, self.q, self.Ap, self.sum = None, None, None, None, None
         self.dtype = ti.f32
         self.dim = None
         self.multiply = None
+        self.project = None
     
     def initialize(self, dim, shape, functions_dict, dtype=ti.f32):
         # Function to compute the Ap in CG
         self.multiply = functions_dict["multiply"]
+        self.project = functions_dict["project"]
         self.dim = dim
         
         self.r = ti.Vector.field(dim, shape=shape, dtype=dtype)
@@ -77,40 +79,53 @@ class ConjugateGradientSolver:
             result += x[I].dot(x[I])
         return ti.sqrt(result)
 
-    def solve(self, x, b):
+    @ti.kernel
+    def precondition(self, dst: ti.template(), src: ti.template(), preconditioner: ti.template()):
+        for I in ti.grouped(dst):
+            dst[I] = src[I] / preconditioner[I] if preconditioner[I] > 0 else src[I]
+
+    def solve(self, x, b, preconditioner):
 
         assert self.multiply is not None
 
         self.reinitialize()
-        # CLear x
         self.multiply(x, self.Ap)
         self.compute_residual(b)
         self.compute_difference(self.r, b, self.Ap)
+        self.project(self.r)
+        self.precondition(self.q, self.r, preconditioner)
 
-        rkTrk = abs(self.reduction(self.r))
-        self.copy(self.p, self.r)
-        # residual_norm = self.compute_norm(self.r)
-        residual_norm = ti.sqrt(rkTrk)
+        self.copy(self.p, self.q)
+
+        # rkTrk = abs(self.reduction(self.r))
+        zkTrk = abs(self.dot_product(self.r, self.q))
+
+        residual_preconditoned_norm = ti.sqrt(zkTrk)
         for i in range(self.max_iterations):
-            if residual_norm < self.relative_tolerance * residual_norm:
-                print(f"\033[1;31m CG terminated at {i}, Residual norm = {residual_norm} \033[0m")
+            if residual_preconditoned_norm < self.relative_tolerance * residual_preconditoned_norm:
+                print(f"\033[1;31m CG terminated at {i}, (precondtioned norm) Residual = {residual_preconditoned_norm} \033[0m")
                 break
-            if i % 10 == 0:
-                print(f"\033[1;31m CG iteration: {i}, Residual norm = {residual_norm} \033[0m")
+            if i % 50 == 0:
+                print(f"\033[1;31m CG iteration: {i}, (precondtioned norm) Residual = {residual_preconditoned_norm} \033[0m")
                 pass
             self.multiply(self.p, self.Ap)
-            alpha = rkTrk / self.dot_product(self.Ap, self.p)
+            self.project(self.Ap)
+            alpha = zkTrk / self.dot_product(self.Ap, self.p)
 
             # Update x
             self.update(x, self.p, alpha)
             # Update r
             self.update(self.r, self.Ap, -alpha)
-            residual_norm = self.compute_norm(self.r)
 
-            rkTrk_last = rkTrk
+            self.precondition(self.q, self.r, preconditioner)
 
-            rkTrk = self.reduction(self.r)
-            beta = rkTrk / rkTrk_last
-            # print("rkTrk ", rkTrk, "alpha ", alpha, "beta ", beta)
+            zkTrk_last = zkTrk
+            # rkTrk = self.reduction(self.r)
+            zkTrk = self.dot_product(self.q, self.r)
+            beta = zkTrk / zkTrk_last
+            # print("zkTrk ", zkTrk, "alpha ", alpha, "beta ", beta)
             # Update p
-            self.update_general(self.p, self.r, self.p, beta)
+            self.update_general(self.p, self.q, self.p, beta)
+
+            # residual_norm = self.compute_norm(self.r)
+            residual_preconditoned_norm = ti.sqrt(zkTrk)
