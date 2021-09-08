@@ -181,7 +181,7 @@ class MlsMpmSolver(MPMSimulationBase):
             self.material[i] = i // self.group_size  # 0: fluid 1: jelly 2: snow
             self.v[i] = ti.Matrix([0 for _ in range(self.dim)])
             if self.material[i] == 0:
-                self.v[i] = ti.Matrix([0, 2.0, 0.0])
+                self.v[i] = ti.Matrix([0, -2.0, 0.0])
                 self.colors[i] = (0, 0.5, 0.5)
             if self.material[i] == 1:
                 self.v[i] = ti.Matrix([0, -2.0, 0.0])
@@ -376,22 +376,22 @@ class MlsMpmSolver(MPMSimulationBase):
             self.Aij[p] = ti.zero(self.Aij[p])
             self.B01[p] = ti.zero(self.B01[p])
         if ti.static(self.dim == 3):
-            self.psi0[p] = 0  # d_PsiHat_d_sigma0
-            self.psi1[p] = 0  # d_PsiHat_d_sigma1
-            self.psi2[p] = 0  # d_PsiHat_d_sigma2
-            self.psi00[p] = 0  # d^2_PsiHat_d_sigma0_d_sigma0
-            self.psi11[p] = 0  # d^2_PsiHat_d_sigma1_d_sigma1
-            self.psi22[p] = 0  # d^2_PsiHat_d_sigma2_d_sigma2
-            self.psi01[p] = 0  # d^2_PsiHat_d_sigma0_d_sigma1
-            self.psi02[p] = 0  # d^2_PsiHat_d_sigma0_d_sigma2
-            self.psi12[p] = 0  # d^2_PsiHat_d_sigma1_d_sigma2
+            self.psi0[p] = 0.  # d_PsiHat_d_sigma0
+            self.psi1[p] = 0.  # d_PsiHat_d_sigma1
+            self.psi2[p] = 0.  # d_PsiHat_d_sigma2
+            self.psi00[p] = 0.  # d^2_PsiHat_d_sigma0_d_sigma0
+            self.psi11[p] = 0.  # d^2_PsiHat_d_sigma1_d_sigma1
+            self.psi22[p] = 0.  # d^2_PsiHat_d_sigma2_d_sigma2
+            self.psi01[p] = 0.  # d^2_PsiHat_d_sigma0_d_sigma1
+            self.psi02[p] = 0.  # d^2_PsiHat_d_sigma0_d_sigma2
+            self.psi12[p] = 0.  # d^2_PsiHat_d_sigma1_d_sigma2
 
-            self.m01[p] = 0  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
-            self.p01[p] = 0  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
-            self.m02[p] = 0  # (psi0-psi2)/(sigma0-sigma2), usually can be computed robustly
-            self.p02[p] = 0  # (psi0+psi2)/(sigma0+sigma2), need to clamp bottom with 1e-6
-            self.m12[p] = 0  # (psi1-psi2)/(sigma1-sigma2), usually can be computed robustly
-            self.p12[p] = 0  # (psi1+psi2)/(sigma1+sigma2), need to clamp bottom with 1e-6
+            self.m01[p] = 0.  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
+            self.p01[p] = 0.  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
+            self.m02[p] = 0.  # (psi0-psi2)/(sigma0-sigma2), usually can be computed robustly
+            self.p02[p] = 0.  # (psi0+psi2)/(sigma0+sigma2), need to clamp bottom with 1e-6
+            self.m12[p] = 0.  # (psi1-psi2)/(sigma1-sigma2), usually can be computed robustly
+            self.p12[p] = 0.  # (psi1+psi2)/(sigma1+sigma2), need to clamp bottom with 1e-6
             self.Aij[p] = ti.zero(self.Aij[p])
             self.B01[p] = ti.zero(self.B01[p])
             self.B12[p] = ti.zero(self.B12[p])
