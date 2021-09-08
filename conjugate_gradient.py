@@ -3,7 +3,7 @@ import taichi as ti
 
 @ti.data_oriented
 class ConjugateGradientSolver:
-    def __init__(self, max_iterations=100, relative_tolerance=1e-3):
+    def __init__(self, max_iterations=20, relative_tolerance=1e-3):
         self.max_iterations = max_iterations
         self.relative_tolerance = relative_tolerance
         self.r, self.p, self.q, self.Ap, self.sum = None, None, None, None, None
@@ -101,11 +101,12 @@ class ConjugateGradientSolver:
         zkTrk = abs(self.dot_product(self.r, self.q))
 
         residual_preconditoned_norm = ti.sqrt(zkTrk)
+        local_tolerance = residual_preconditoned_norm * self.relative_tolerance
         for i in range(self.max_iterations):
-            if residual_preconditoned_norm < self.relative_tolerance * residual_preconditoned_norm:
+            if residual_preconditoned_norm < local_tolerance:
                 print(f"\033[1;31m CG terminated at {i}, (precondtioned norm) Residual = {residual_preconditoned_norm} \033[0m")
                 break
-            if i % 50 == 0:
+            if i % 9 == 0:
                 print(f"\033[1;31m CG iteration: {i}, (precondtioned norm) Residual = {residual_preconditoned_norm} \033[0m")
                 pass
             self.multiply(self.p, self.Ap)

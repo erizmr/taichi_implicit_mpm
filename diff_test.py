@@ -12,7 +12,7 @@ class DiffTest:
                  compute_energy_gradient,
                  update_simualtion_state,
                  multipy,
-                 diff_test_perturbation_scale=1000,
+                 diff_test_perturbation_scale=10000,
                  dtype=ti.f32,
                  is_test_hessian=True):
         self.dim = dim
@@ -24,7 +24,7 @@ class DiffTest:
         self.update_simulation_state = update_simualtion_state
         self.multiply = multipy
 
-        self.diff_test_perturbation_scale = diff_test_perturbation_scale
+        self.diff_test_perturbation_scale = diff_test_perturbation_scale if self.dim == 2 else diff_test_perturbation_scale * 100
 
         self.e0 = 0.0
         shape = dv.shape
@@ -104,7 +104,7 @@ class DiffTest:
         self.update_simulation_state(dv)
 
     @ti.kernel
-    def compute_force_difference(self, f0: ti.template(), f1: ti.template(), h: ti.f32):
+    def compute_force_difference(self, f0: ti.template(), f1: ti.template(), h: ti.f64):
         for I in ti.grouped(f0):
             self.force_difference[I] = (f0[I] - f1[I]) * (1 / h)
 
@@ -114,14 +114,14 @@ class DiffTest:
             self.force_differential[I] = (df0[I] + df1[I]) * 0.5
 
     @ti.kernel
-    def compute_difference_norm(self, x: ti.template(), y: ti.template()) -> ti.f32:
+    def compute_difference_norm(self, x: ti.template(), y: ti.template()) -> ti.f64:
         result = 0.0
         for I in ti.grouped(x):
             result += (x[I] - y[I]).dot(x[I] - y[I])
         return ti.sqrt(result)
 
     @ti.kernel
-    def compute_norm(self, x: ti.template()) -> ti.f32:
+    def compute_norm(self, x: ti.template()) ->ti.f64:
         result = 0.0
         for I in ti.grouped(x):
             result += x[I].dot(x[I])

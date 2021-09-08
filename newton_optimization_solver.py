@@ -31,7 +31,7 @@ class NewtonSolver:
         self.project = functions_dict["project"]
 
         # Define a CG solver
-        self.linear_solver = ConjugateGradientSolver(max_iterations=51, relative_tolerance=1e-3)
+        self.linear_solver = ConjugateGradientSolver(max_iterations=20, relative_tolerance=1e-3)
         self.linear_solver.initialize(dim=dim,
                                       shape=shape,
                                       functions_dict={"multiply": self.multiply,
@@ -78,4 +78,6 @@ class NewtonSolver:
             self.linear_solve(self.step_direction, self.residual, preconditioner)
             self.update_step(x, self.step_direction, 1.0)
             self.update_simulation_state(x)
-            # self.clear_step_direction()
+
+            # Set zero initial solution for newton
+            self.clear_step_direction()

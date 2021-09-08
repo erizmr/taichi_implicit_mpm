@@ -3,7 +3,7 @@ import taichi as ti
 
 @ti.data_oriented
 class GradientDescentSolver:
-    def __init__(self, max_iterations=10, step_size=10.0, tolerance=1e-3, adaptive_step_size=False):
+    def __init__(self, max_iterations=10, step_size=10.0, tolerance=1e-6, adaptive_step_size=False):
         self.max_iterations = max_iterations
         self.step_size = step_size
         self.adaptive_step_size = adaptive_step_size
