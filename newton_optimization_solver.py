@@ -4,19 +4,22 @@ from conjugate_gradient import ConjugateGradientSolver
 
 @ti.data_oriented
 class NewtonSolver:
-    def __init__(self, max_iterations=10, tolerance=1e-3):
+    def __init__(self, line_search=False, max_iterations=10, tolerance=1e-3):
         self.dtype = ti.f32
         self.max_iterations = max_iterations
         self.tolerance = tolerance
+        self.line_search = line_search
         self.dim = None
         self.step_direction = None
         self.residual = None
         self.linear_solver = None
         # Simulation specific functions
+        self.total_energy = None
         self.multiply = None
         self.compute_residual = None
         self.update_simulation_state = None
         self.project = None
+        self.ddv_checker = None
 
     def initialize(self, dim, shape, functions_dict, dtype=ti.f32):
         self.dtype = dtype
@@ -25,10 +28,12 @@ class NewtonSolver:
         self.residual = ti.Vector.field(dim, dtype=self.dtype, shape=shape)
 
         # Get the simulation specific functions
+        self.total_energy = functions_dict["total_energy"]
         self.multiply = functions_dict["multiply"]
         self.compute_residual = functions_dict["compute_residual"]
         self.update_simulation_state = functions_dict["update_simulation_state"]
         self.project = functions_dict["project"]
+        self.ddv_checker = functions_dict["ddv_checker"]
 
         # Define a CG solver
         self.linear_solver = ConjugateGradientSolver(max_iterations=1000, relative_tolerance=1e-3)
@@ -48,9 +53,19 @@ class NewtonSolver:
         self.linear_solver.solve(x, b, precondtioner)
 
     @ti.kernel
-    def update_step(self, dst: ti.template(), src: ti.template(), scale: ti.f32):
+    def update_step(self, dst: ti.template(), src: ti.template(), scale: ti.f64):
         for I in ti.grouped(src):
             dst[I] += scale * src[I]
+
+    @ti.kernel
+    def update_general(self, dst: ti.template(), src1: ti.template(), src2: ti.template(), scale: ti.f64):
+        for I in ti.grouped(dst):
+            dst[I] = src1[I] + scale * src2[I]
+
+    @ti.kernel
+    def copy(self, dst: ti.template(), src: ti.template()):
+        for I in ti.grouped(dst):
+            dst[I] = src[I]
 
     @ti.kernel
     def clear_step_direction(self):
@@ -63,7 +78,13 @@ class NewtonSolver:
         assert self.compute_residual is not None
         assert self.update_simulation_state is not None
 
+        E_0 = 0.0
+        if self.line_search:
+            E_0 = self.total_energy()
         self.update_simulation_state(x)
+        
+        # TODO: check self.dv[I] == whether self.grid_v[I], it should be automatic satisfied if CG is correct
+        # self.ddv_checker(0, 0)
         for n in range(self.max_iterations):
             # Compute RHS
             self.compute_residual(self.residual)
@@ -76,8 +97,22 @@ class NewtonSolver:
                 print(f'\033[1;36m [Newton] Iter = {n}, Residual Norm = {residual_norm} \033[0m')
 
             self.linear_solve(self.step_direction, self.residual, preconditioner)
-            self.update_step(x, self.step_direction, 1.0)
-            self.update_simulation_state(x)
+            if self.line_search:
+                step_size, E = 1.0, 0.0
+                for _ in range(5):
+                    self.update_general(self.dv, self.dv0, self.step_direction, step_size)
+                    E = self.total_energy()
+                    step_size /= 2
+                    if E < E_0:
+                        break
+                E_0 = E
+                self.copy(self.dv0, self.dv)
+            else:
+                self.update_step(x, self.step_direction, 1.0)
+                # TODO: check self.dv[I] == whether self.grid_v[I], it should be automatic satisfied if CG is correct
+                # self.ddv_checker(n, 1)
+                self.update_simulation_state(x)
 
             # Set zero initial solution for linear solver
             self.clear_step_direction()
+        # self.ddv_checker(self.max_iterations, 2)
