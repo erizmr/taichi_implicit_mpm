@@ -12,7 +12,7 @@ class DiffTest:
                  compute_energy_gradient,
                  update_simualtion_state,
                  multipy,
-                 diff_test_perturbation_scale=10000,
+                 diff_test_perturbation_scale=100000,
                  dtype=ti.f32,
                  is_test_hessian=True):
         self.dim = dim

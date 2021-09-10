@@ -4,15 +4,17 @@ from conjugate_gradient import ConjugateGradientSolver
 
 @ti.data_oriented
 class NewtonSolver:
-    def __init__(self, line_search=False, max_iterations=10, tolerance=1e-3):
+    def __init__(self, line_search=False, line_search_steps=5, max_iterations=10, tolerance=1e-3):
         self.dtype = ti.f32
         self.max_iterations = max_iterations
         self.tolerance = tolerance
         self.line_search = line_search
+        self.line_search_step = line_search_steps
         self.dim = None
         self.step_direction = None
         self.residual = None
         self.linear_solver = None
+        self.dv0 = None
         # Simulation specific functions
         self.total_energy = None
         self.multiply = None
@@ -35,12 +37,17 @@ class NewtonSolver:
         self.project = functions_dict["project"]
         self.ddv_checker = functions_dict["ddv_checker"]
 
+        cg_tolerance = 1e-6 if dim == 2 else 1e-8
         # Define a CG solver
-        self.linear_solver = ConjugateGradientSolver(max_iterations=1000, relative_tolerance=1e-3)
+        self.linear_solver = ConjugateGradientSolver(max_iterations=1000, relative_tolerance=cg_tolerance)
         self.linear_solver.initialize(dim=dim,
                                       shape=shape,
                                       functions_dict={"multiply": self.multiply,
                                                       "project": self.project})
+
+        # Holder for line search
+        if self.line_search:
+            self.dv0 = ti.Vector.field(dim, dtype=dtype, shape=shape)
 
     @ti.kernel
     def compute_residual_norm(self, x: ti.template()) -> ti.f32:
@@ -80,6 +87,7 @@ class NewtonSolver:
 
         E_0 = 0.0
         if self.line_search:
+            self.copy(self.dv0, x)
             E_0 = self.total_energy()
         self.update_simulation_state(x)
         
@@ -99,20 +107,22 @@ class NewtonSolver:
             self.linear_solve(self.step_direction, self.residual, preconditioner)
             if self.line_search:
                 step_size, E = 1.0, 0.0
-                for _ in range(5):
-                    self.update_general(self.dv, self.dv0, self.step_direction, step_size)
+                for l in range(self.line_search_step):
+                    self.update_general(x, self.dv0, self.step_direction, step_size)
+                    self.update_simulation_state(x)
                     E = self.total_energy()
+                    # if ti.static(self.debug_mode):
+                    print(f'\033[1;32m[line search] step={l}, E = {E},  E0 = {E_0} \033[0m')
                     step_size /= 2
                     if E < E_0:
                         break
                 E_0 = E
-                self.copy(self.dv0, self.dv)
+                self.copy(self.dv0, x)
             else:
                 self.update_step(x, self.step_direction, 1.0)
                 # TODO: check self.dv[I] == whether self.grid_v[I], it should be automatic satisfied if CG is correct
-                # self.ddv_checker(n, 1)
                 self.update_simulation_state(x)
+            # self.ddv_checker(n, 1)
 
             # Set zero initial solution for linear solver
             self.clear_step_direction()
-        # self.ddv_checker(self.max_iterations, 2)

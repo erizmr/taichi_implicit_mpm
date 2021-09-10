@@ -1,48 +1,50 @@
 import taichi as ti
 import numpy as np
 from mpm_base import MPMSimulationBase
-from gradient_descent import GradientDescentSolver
-from conjugate_gradient import ConjugateGradientSolver
-from newton_optimization_solver import NewtonSolver
 from diff_test import DiffTest
-
-ti.init(arch=ti.cuda)
 
 
 @ti.data_oriented
 class MlsMpmSolver(MPMSimulationBase):
-    def __init__(self, dt=1e-4, dim=2, gravity=9.8,
+    def __init__(self, res, dt=1e-4,
+                 size=1,
+                 gravity=9.8,
                  gravity_dim=1,
+                 dtype=ti.f32,
                  implicit=False,
                  optimization_solver=None,
                  do_diff_test=False):
         super(MlsMpmSolver, self).__init__(implicit=implicit)
         self.step = 0
-        self.dim = dim
-        self.real = ti.f32
+        self.dim = len(res)
+        self.res = res
+        self.real = dtype
         self.quality = 1  # Use a larger value for higher-res simulations
         self.ignore_collision = False
         self.debug_mode = True
         self.optimization_solver_name, self.optimization_solver = optimization_solver
         self.do_diff_test = do_diff_test
-        self.n_particles, self.n_grid = 6000 * self.quality ** self.dim, 128 * self.quality
+        
+        self.n_grid = 64 * self.quality
+        self.dx, self.inv_dx = 1 / self.n_grid, float(self.n_grid)
+        self.p_vol, self.p_rho = (self.dx * 0.5) ** self.dim, 1
+        self.p_mass = self.p_vol * self.p_rho
+        self.n_particles = 15625 * self.quality ** self.dim
         print(f"Particle Number: {self.n_particles}, n_grid: {self.n_grid}")
+
         self.grid_shape = (self.n_grid,) * self.dim
         self.n_nodes = self.n_grid ** self.dim
         self.bound = 3  # boundary of the simulation domain
         self.neighbour = (3,) * self.dim
         self.group_size = self.n_particles // 2
-        self.dx, self.inv_dx = 1 / self.n_grid, float(self.n_grid)
         self.dt = dt / self.quality
-        self.cfl_limit = 1.0
+        self.cfl_limit = 0.4
 
-        self.p_vol, self.p_rho = (self.dx * 0.5) ** self.dim, 1
-        self.p_mass = self.p_vol * self.p_rho
         self.E, self.nu = 1e3, 0.2  # Young's modulus and Poisson's ratio
         self.mu_0, self.lambda_0 = self.E / (2 * (1 + self.nu)), self.E * self.nu / (
                 (1 + self.nu) * (1 - 2 * self.nu))  # Lame parameters
 
-        self.gravity = ti.Vector([(-gravity if i == gravity_dim else 0) for i in range(dim)])
+        self.gravity = ti.Vector([(-gravity if i == gravity_dim else 0) for i in range(self.dim)])
 
         # Max velocity for CFL checking
         self.max_velocity = ti.field(dtype=self.real, shape=())
@@ -71,16 +73,10 @@ class MlsMpmSolver(MPMSimulationBase):
             self.old_F = ti.Matrix.field(self.dim, self.dim, dtype=self.real,
                                          shape=self.n_particles)  # backup deformation gradient
 
-            # # Quantities for linear solver
-            # self.mass_matrix = ti.field(dtype=self.real, shape=self.n_nodes)
-            # self.dv = ti.Vector.field(dim, dtype=self.real, shape=self.n_nodes)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
-            # self.residual = ti.Vector.field(dim, dtype=self.real, shape=self.n_nodes)
-
             # Quantities for linear solver
             self.mass_matrix = ti.field(dtype=self.real, shape=self.grid_shape)
             self.dv = ti.Vector.field(self.dim, dtype=self.real,
                                       shape=self.grid_shape)  # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
-            # self.residual = ti.Vector.field(dim, dtype=self.real, shape=self.grid_shape)
 
             self.diff_test = None
             if self.do_diff_test:
@@ -111,9 +107,9 @@ class MlsMpmSolver(MPMSimulationBase):
                                 shape=self.n_particles)  # (psi0-psi1)/(sigma0-sigma1), usually can be computed robustly
             self.p01 = ti.field(dtype=self.real,
                                 shape=self.n_particles)  # (psi0+psi1)/(sigma0+sigma1), need to clamp bottom with 1e-6
-            self.Aij = ti.Matrix.field(dim, dim, dtype=self.real, shape=self.n_particles)
+            self.Aij = ti.Matrix.field(self.dim, self.dim, dtype=self.real, shape=self.n_particles)
             self.B01 = ti.Matrix.field(2, 2, dtype=self.real, shape=self.n_particles)
-            if ti.static(dim == 3):
+            if ti.static(self.dim == 3):
                 self.psi2 = ti.field(dtype=self.real, shape=self.n_particles)  # d_PsiHat_d_sigma2
                 self.psi22 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma2_d_sigma2
                 self.psi02 = ti.field(dtype=self.real, shape=self.n_particles)  # d^2_PsiHat_d_sigma0_d_sigma2
@@ -156,13 +152,13 @@ class MlsMpmSolver(MPMSimulationBase):
     def simulation_initialize_2D(self):
         for i in range(self.n_particles):
             self.x[i] = [
-                ti.random() * 0.2 + 0.3 + 0.10 * (i // self.group_size),
+                ti.random() * 0.2 + 0.2 + 0.10 * (i // self.group_size),
                 ti.random() * 0.2 + 0.05 + 0.4 * (i // self.group_size)
             ]
             self.material[i] = i // self.group_size  # 0: fluid 1: jelly 2: snow
             self.v[i] = ti.Matrix([0 for _ in range(self.dim)])
             if self.material[i] == 0:
-                self.v[i] = ti.Matrix([0, 20.0])
+                self.v[i] = ti.Matrix([0, -3.0])
                 self.colors[i] = (0, 0.5, 0.5)
             if self.material[i] == 1:
                 self.v[i] = ti.Matrix([0, -2.0])
@@ -171,13 +167,13 @@ class MlsMpmSolver(MPMSimulationBase):
                 self.v[i] = ti.Matrix([0, -3.0])
             self.F[i] = ti.Matrix([[1, 0], [0, 1]])
             self.Jp[i] = 1
-            self.max_velocity[None] = 20.0
+            self.max_velocity[None] = 3.0
 
     @ti.kernel
     def simulation_initialize_3D(self):
         for i in range(self.n_particles):
             self.x[i] = [
-                ti.random() * 0.2 + 0.3 + 0.10 * (i // self.group_size),
+                ti.random() * 0.2 + 0.3, # + 0.10 * (i // self.group_size),
                 ti.random() * 0.2 + 0.05 + 0.32 * (i // self.group_size),
                 ti.random() * 0.2 + 0.05
                 ]
@@ -310,7 +306,6 @@ class MlsMpmSolver(MPMSimulationBase):
             self.newton_solve()
 
         self.restore_strain()
-        # self.ddv_checker(20, 2)
         self.construct_new_velocity_from_newton_result()
         self.step += 1
 
@@ -348,10 +343,6 @@ class MlsMpmSolver(MPMSimulationBase):
     @ti.func
     def dPdF_of_sigma_contract(self, p, A, B: ti.template()):
         if ti.static(self.dim == 2):
-            # B[0, 0] = self.psi00[p] * A[0, 0] + self.psi01[p] * A[1, 1]
-            # B[1, 1] = self.psi01[p] * A[0, 0] + self.psi11[p] * A[1, 1]
-            # B[0, 1] = ((self.m01[p] + self.p01[p]) * A[0, 1] + (self.m01[p] - self.p01[p]) * A[1, 0]) * 0.5
-            # B[1, 0] = ((self.m01[p] - self.p01[p]) * A[0, 1] + (self.m01[p] + self.p01[p]) * A[1, 0]) * 0.5
             B[0, 0] = self.Aij[p][0, 0] * A[0, 0] + self.Aij[p][0, 1] * A[1, 1]
             B[1, 1] = self.Aij[p][1, 0] * A[0, 0] + self.Aij[p][1, 1] * A[1, 1]
             B[0, 1] = self.B01[p][0, 0] * A[0, 1] + self.B01[p][0, 1] * A[1, 0]
@@ -531,8 +522,6 @@ class MlsMpmSolver(MPMSimulationBase):
                 # node_id = self.idx(I)
                 # node_id = I
                 if ti.static(not self.ignore_collision):
-                    # cond = any(I < self.bound and self.grid_v[I] < 0) or any(
-                    #         I > self.n_grid - self.bound and self.grid_v[I] > 0)
                     cond = any(I < self.bound) or any(I > self.n_grid - self.bound)
                     self.dv[I] = -self.grid_v[I] if cond else self.gravity * self.dt
                 else:
@@ -546,17 +535,12 @@ class MlsMpmSolver(MPMSimulationBase):
                 cond = any(I < self.bound) or any(I > self.n_grid - self.bound)
                 # if cond:
                 #     print("after", cond, "indices ", I, self.grid_v[I])
-        # for I in ti.grouped(self.grid_m):
-        #     if self.grid_m[I] > 0:
-        #         cond = any(I < self.bound and self.grid_v[I] < 0) or any(I > self.n_grid - self.bound and self.grid_v[I] > 0)
-        #         if cond:
-        #             print("after", cond, "indices ", I, self.grid_v[I])
 
     @ti.kernel
     def ddv_checker(self, step: ti.i32, mark: ti.i32):
         for I in ti.grouped(self.grid_m):
             if self.grid_m[I] > 0:
-                cond = any(I < self.bound and self.grid_v[I] < 0) or any(I > self.n_grid - self.bound and self.grid_v[I] > 0)
+                cond = any(I < self.bound) or any(I > self.n_grid - self.bound)
                 if cond: # and any(abs(self.grid_v[I] + self.dv[I])) > 1e-6:
                     print("[MARK]", mark, "indices ", I, " Step", step, "grid v", self.grid_v[I], " dv", self.dv[I], 'residual', abs(self.grid_v[I] + self.dv[I]))
 
@@ -670,8 +654,6 @@ class MlsMpmSolver(MPMSimulationBase):
     @ti.func
     def project(self, x: ti.template()):
         for I in ti.grouped(x):
-            # cond = any(I < self.bound and self.grid_v[I] < 0) or any(
-            #     I > self.n_grid - self.bound and self.grid_v[I] > 0)
             cond = any(I < self.bound) or any(I > self.n_grid - self.bound)
             if cond:
                 x[I] = ti.zero(x[I])
@@ -689,7 +671,7 @@ class MlsMpmSolver(MPMSimulationBase):
         # Compute the RHS (i.e. usually energy gradient) of the linear system
         for I in ti.grouped(self.dv):
             residual[I] = self.dt * self.mass_matrix[I] * self.gravity
-        #
+        # #
         # inertia part
         for I in ti.grouped(self.dv):
             residual[I] -= self.mass_matrix[I] * self.dv[I]
@@ -746,100 +728,63 @@ class MlsMpmSolver(MPMSimulationBase):
                 if new_v[idx_v] > self.max_velocity[None]:
                     self.max_velocity[None] = new_v[idx_v]
 
+    @ti.func
+    def seed_particle(self, i, x, material, color, velocity):
+        self.x[i] = x
+        self.v[i] = velocity
+        self.F[i] = ti.Matrix.identity(ti.f32, self.dim)
+        self.color[i] = color
+        self.material[i] = material
 
-if __name__ == '__main__':
-    import argparse
+        if ti.static(self.support_plasticity):
+            if material == self.material_sand:
+                self.Jp[i] = 0
+            else:
+                self.Jp[i] = 1
 
-    parser = argparse.ArgumentParser(description='MPM')
-    parser.add_argument('--dim', type=int,
-                        default=2,
-                        help='dimension')
-    parser.add_argument('--implicit', action='store_true',
-                        help='implicit or not')
-    parser.add_argument('--difftest', action='store_true',
-                        help='do difftest or not')
-    parser.add_argument('--gradient_descent', action='store_true',
-                        help='do gradient descent or not')
-    args = parser.parse_args()
+    @ti.kernel
+    def seed(self, new_particles: ti.i32, new_material: ti.i32, color: ti.i32):
+        for i in range(self.n_particles[None],
+                       self.n_particles[None] + new_particles):
+            self.material[i] = new_material
+            x = ti.Vector.zero(ti.f32, self.dim)
+            for k in ti.static(range(self.dim)):
+                x[k] = self.source_bound[0][k] + ti.random(
+                ) * self.source_bound[1][k]
+            self.seed_particle(i, x, new_material, color,
+                               self.source_velocity[None])
 
-    dim = args.dim
-    assert dim == 2 or dim == 3
+    def set_source_velocity(self, velocity):
+        if velocity is not None:
+            velocity = list(velocity)
+            assert len(velocity) == self.dim
+            self.source_velocity[None] = velocity
+        else:
+            for i in range(self.dim):
+                self.source_velocity[None][i] = 0
 
-    # optimization_solver_type = 'gradient_descent'
-    optimization_solver_type = 'newton'
-    if args.gradient_descent:
-        optimization_solver_type = 'gradient_descent'
-    dt = 1e-4
-    if args.implicit:
-        dt = 1e-3
+    def add_cube(self,
+                 lower_corner,
+                 cube_size,
+                 material,
+                 color=0xFFFFFF,
+                 sample_density=None,
+                 velocity=None):
+        if sample_density is None:
+            sample_density = 2 ** self.dim
+        vol = 1
+        for i in range(self.dim):
+            vol = vol * cube_size[i]
+        num_new_particles = int(sample_density * vol / self.dx ** self.dim + 1)
+        assert self.n_particles[
+                   None] + num_new_particles <= self.max_num_particles
 
-    visualization_limit = dt
-    optimization_solver = None
-    if optimization_solver_type == 'gradient_descent':
-        optimization_solver = (
-        optimization_solver_type, GradientDescentSolver(max_iterations=100, adaptive_step_size=False))
-    elif optimization_solver_type == 'newton':
-        optimization_solver = (optimization_solver_type, NewtonSolver(max_iterations=20, tolerance=1e-6))
+        for i in range(self.dim):
+            self.source_bound[0][i] = lower_corner[i]
+            self.source_bound[1][i] = cube_size[i]
 
-    solver = MlsMpmSolver(dt=dt,
-                          dim=dim,
-                          gravity=9.8,
-                          implicit=args.implicit,
-                          optimization_solver=optimization_solver,
-                          do_diff_test=args.difftest)
-    solver.initialize()
+        self.set_source_velocity(velocity=velocity)
 
-    if dim == 2:
-
-        # gui = ti.GUI("Taichi MLS-MPM", res=512, background_color=0x112F41)
-        # while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
-        #     for s in range(int(visualization_limit // solver.dt)):
-        #         solver.advance_one_time_step()
-        #     gui.circles(solver.x.to_numpy(),
-        #                 radius=1.5,
-        #                 palette=[0x068587, 0xED553B, 0xEEEEF0],
-        #                 palette_indices=solver.material)
-        #     gui.show(f'{solver.step:06d}.png')  # Change to gui.show(f'{frame:06d}.png') to write images to disk
-        #
-        window = ti.ui.Window('Taichi MLS-MPM', (512, 512))
-        canvas = window.get_canvas()
-
-        while window.running:
-            # for s in range(int(visualization_limit // solver.dt)):
-            for s in range(int(5)):
-                solver.advance_one_time_step()
-            canvas.set_background_color((0.067, 0.184, 0.255))
-            canvas.circles(solver.x,
-                           radius=0.0025,
-                           per_vertex_color=solver.colors)
-            window.show()
-    elif dim == 3:
-        res = (1024, 1024)
-        window = ti.ui.Window("MLS-MPM 3D", res, vsync=True)
-
-        # Set up
-        frame_id = 0
-        canvas = window.get_canvas()
-        scene = ti.ui.Scene()
-        camera = ti.ui.make_camera()
-        camera.position(0.5, 1.0, 1.95)
-        camera.lookat(0.5, 0.3, 0.5)
-        camera.fov(55)
-
-        while window.running:
-            for s in range(int(visualization_limit // solver.dt)):
-                solver.advance_one_time_step()
-            # Render
-            camera.track_user_inputs(window, movement_speed=0.03, hold_key=ti.ui.RMB)
-            scene.set_camera(camera)
-
-            scene.ambient_light((0, 0, 0))
-
-            scene.particles(solver.x, per_vertex_color=solver.colors, radius=0.002)
-            scene.point_light(pos=(0.5, 1.5, 0.5), color=(0.5, 0.5, 0.5))
-            scene.point_light(pos=(0.5, 1.5, 1.5), color=(0.5, 0.5, 0.5))
-
-            canvas.scene(scene)
-
-            window.show()
+        self.seed(num_new_particles, material, color)
+        self.n_particles[None] += num_new_particles
 

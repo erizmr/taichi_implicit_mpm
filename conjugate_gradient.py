@@ -56,7 +56,7 @@ class ConjugateGradientSolver:
     @ti.kernel
     def update(self, dst: ti.template(), src: ti.template(), scale: ti.f32):
         for I in ti.grouped(src):
-            dst[I] += scale * src[I]
+            dst[I] = dst[I] + scale * src[I]
 
     @ti.kernel
     def update_general(self, dst: ti.template(), src_1: ti.template(), src_2: ti.template(), scale: ti.f32):
